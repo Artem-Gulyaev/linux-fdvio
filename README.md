@@ -5,6 +5,7 @@ This is the Full Duplex VirtIO (ICCom compatible) driver.
 It is located between ICCom on top and the transport layers
 at the bottom.
 
+```
 |---------------------|
 |        ICCom        |
 |---------------------|
@@ -21,6 +22,7 @@ at the bottom.
            |
            v
       shared memory         
+```
 
 So, the Fdvio driver provides the Full Duplex Symmetrical Transport Interface
 to the ICCom, and uses the Rpmsg IF to implement the functionality.
