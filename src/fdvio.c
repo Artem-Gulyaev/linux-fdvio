@@ -28,6 +28,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/printk.h>
+#include <linux/delay.h>
 #include <linux/rpmsg.h>
 
 #include <linux/full_duplex_interface.h>
@@ -40,25 +41,48 @@
 
 
 #define fdvio_emerg(fmt, ...)                                               \
-    dev_emerg(fdvio->dev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+    dev_emerg(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
               , __func__, __LINE__, ##__VA_ARGS__)
 #define fdvio_crit(dev, fmt, ...)                                           \
-    dev_crit(fdvio->dev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+    dev_crit(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
               , __func__, __LINE__, ##__VA_ARGS__)
 #define fdvio_alert(dev, fmt, ...)                                          \
-    dev_alert(fdvio->dev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+    dev_alert(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
               , __func__, __LINE__, ##__VA_ARGS__)
 #define fdvio_err(dev, fmt, ...)                                            \
-    dev_err(fdvio->dev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+    dev_err(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
               , __func__, __LINE__, ##__VA_ARGS__)
 #define fdvio_warn(dev, fmt, ...)                                           \
-    dev_warn(fdvio->dev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+    dev_warn(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
               , __func__, __LINE__, ##__VA_ARGS__)
 #define fdvio_notice(dev, fmt, ...)                                         \
-    dev_notice(fdvio->dev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+    dev_notice(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
               , __func__, __LINE__, ##__VA_ARGS__)
 #define fdvio_info(dev, fmt, ...)                                           \
-    dev_info(fdvio->dev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+    dev_info(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+              , __func__, __LINE__, ##__VA_ARGS__)
+
+
+#define fdvio_emerg_rlim(fmt, ...)                                               \
+    dev_emerg_ratelimited(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+              , __func__, __LINE__, ##__VA_ARGS__)
+#define fdvio_crit_rlim(dev, fmt, ...)                                           \
+    dev_crit_ratelimited(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+              , __func__, __LINE__, ##__VA_ARGS__)
+#define fdvio_alert_rlim(dev, fmt, ...)                                          \
+    dev_alert_ratelimited(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+              , __func__, __LINE__, ##__VA_ARGS__)
+#define fdvio_err_rlim(dev, fmt, ...)                                            \
+    dev_err_ratelimited(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+              , __func__, __LINE__, ##__VA_ARGS__)
+#define fdvio_warn_rlim(dev, fmt, ...)                                           \
+    dev_warn_ratelimited(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+              , __func__, __LINE__, ##__VA_ARGS__)
+#define fdvio_notice_rlim(dev, fmt, ...)                                         \
+    dev_notice_ratelimited(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
+              , __func__, __LINE__, ##__VA_ARGS__)
+#define fdvio_info_rlim(dev, fmt, ...)                                           \
+    dev_info_ratelimited(fdvio->rpdev, FDVIO_LOG_PREFIX"%s: at %d line: "fmt"\n"
               , __func__, __LINE__, ##__VA_ARGS__)
 
 
@@ -70,14 +94,13 @@
 		error_action;                                       \
 	}
 #define FDVIO_CHECK_KERNEL_DEVICE(error_action)             \
-	if (IS_ERR_OR_NULL(fdvio->dev)) {                       \
+	if (IS_ERR_OR_NULL(fdvio->rpdev)) {                     \
 		fdvio_err("%s: no kernel device;\n", __func__);     \
 		error_action;                                       \
 	}
 #define FDVIO_CHECK_PTR(ptr, error_action)                     \
 	if (IS_ERR_OR_NULL(ptr)) {                                 \
-		fdvio_err("%s: "#ptr"(%px): ptr error\n"               \
-				, __func__, ptr);                              \
+		fdvio_err(#ptr"(%px): ptr error\n", ptr);              \
 		error_action;                                          \
 	}
 #define FDVIO_ON_FINISH(action)                   \
@@ -91,6 +114,31 @@
 					FDVIO_STATE_##from) != FDVIO_STATE_##to)
 #define FDVIO_SWITCH_FORCED(to)                          \
 	atomic_set(&fdvio->state, FDVIO_STATE_##to)
+#define FDVIO_STATE(state)                          \
+	(&fdvio->state == FDVIO_STATE_##state)
+
+#ifdef FDVIO_DEBUG
+#define FDVIO_ASSERT_STATE(state)                                          \
+	if (&fdvio->state != FDVIO_STATE_##state) {                            \
+		fdvio_crit("assertion failed: unexpected state: != to "#state);    \
+		BUG_ON(true);								                       \
+	}
+#define FDVIO_ASSERT_DEVICE()                                        \
+	if (IS_ERR_OR_NULL(fdvio)) {                                     \
+		fdvio_crit("assertion failed: broken fdvio device pointer"); \
+		BUG_ON(true);								                 \
+	}
+#define FDVIO_ASSERT_PTR(ptr)                            \
+	if (IS_ERR_OR_NULL(ptr)) {                           \
+		fdvio_crit("assertion failed: broken ptr "#ptr); \
+		BUG_ON(true);								     \
+	}
+#else
+#define FDVIO_ASSERT_STATE(state)
+#define FDVIO_ASSERT_DEVICE()
+#define FDVIO_ASSERT_PTR(ptr)
+#endif
+
 
 /* --------------------------- MAIN STRUCTURES --------------------------*/
 
@@ -119,6 +167,9 @@
 //      * https://elixir.bootlin.com/linux/latest/source/include/linux/rpmsg.h#L55
 //
 
+// The timeout for waiting for the other side data after we have sent our.
+#define FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 20
+
 
 // The cold-and-dark state of the driver - before initialization was even
 // carried out.
@@ -130,18 +181,31 @@
 // State, when nothing is happening, no one waits for anything, no tranfers
 // are executing, no timeouts active. We just sit and wait for an external
 // kick from either side.
+// NOTE: right before we enter the IDLE state all xfer flags must be dropped 
+//     like "got other side data" and "sent our data" flags.
 #define FDVIO_STATE_IDLE 3
-// We come to this state when someone kicks us from the IDLE state normally.
-// It can be:
-// * Data-ready-to-read callback/event from the other side.
+// The state in which we push the outgoing data:
+// * send out our data and
+// * start the timeout timer
+// * then switch to the XFER_RX state
+//
+// we switch to this state by
+// * fdvio_rpmsg_rcv_cb callback from the other side.
 //   NOTE: this event comes from a callback registered by: rpmsg_create_ept(...)
 // * Upper layer kicks us with data xfer request.
 //   NOTE: this is done in data_xchange(...) function implementation AND
 //      in the xfer_done/xfer_fail callbacks.
-#define FDVIO_STATE_XFER 4
+#define FDVIO_STATE_XFER_TX 4
+// The state in which we get the inbound data:
+// * stop timer
+// * call xfer_done
+// * then switch to IDLE state
+//
+// to this state we come from XFER_TX state automatically.
+#define FDVIO_STATE_XFER_RX 5
 // This state indicates an error in fdvio operation. Normally we need to notify
 // the other side about the error and get out of this state as soon as possible.
-#define FDVIO_STATE_ERROR 5
+#define FDVIO_STATE_ERROR 6
 
 
 // This value is used to identify if the instance of the driver data
@@ -152,23 +216,27 @@
 // NOTE: this is not the absolute protection, but mostly the debugging aid.
 #define FDVIO_MAGIC 0x83cad137
 
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
-
-// This data is located at the beginning of the Xfer data (prepended to xfer)
-// which is "sent" to the other side. This data allows to identify
-// the key xfer parameters and synchronize the fdvio drivers on
-// both sides with each other.
-//
-// @xfer_size_bytes the size of the current xfer in bytes (size only of the
-//      user data, the fdvio data is not included in this size).
-// @fdvio_state the value to tell the other side any relevant information
-//      like xfer sizes mismatch error indication, etc..
-// @fdvio_error the specific error condition if the state is ERROR.
-typedef struct {
-    uint32_t xfer_size_bytes;
-    uint32_t fdvio_state;
-    uint32_t fdvio_error;
-} fdvio_diagnostics_info;
+// The sizes of the xfers from both sides are not matching.
+// Example: we're expecting the xfer of 10 bytes, and the other side sends
+//      us 12 bytes.
+#define FDVIO_ERROR_XFER_SIZE_MISMATCH 1
+// We have got more than one inbound message within a single xfer, this normally
+// indicates a sync loss, or basically that the other side dropped the
+// previous xfer due to timeout in waiting for our response.
+#define FDVIO_ERROR_MULTIPLE_RECEIVE 2
+// This error is set upon the error from the rpmsg. For example when the
+// rpmsg faces the timeout of waiting for free buffers in the output VQ.
+#define FDVIO_ERROR_RPMSG 3
+// This error is used to indicate that there was no switch between states
+// cause expectation state didn't match (atomic switch failed)
+#define FDVIO_ERROR_NO_SWITCH 4
+// This error is used in case the other side didn't provide the
+// data on time (after we have sent our data)
+#define FDVIO_ERROR_OTHER_SIDE_TIMEOUT 5
+// The rpmsg send data failed.
+#define FDVIO_ERROR_SEND_FAILED 6
+// Should not happen, unless there is a bug
+#define FDVIO_ERROR_LOGIC 7
 
 
 // The device itself
@@ -180,19 +248,25 @@ typedef struct {
 //      data storage.
 // @next_xfer_id stores the next xfer id - when xfer is just done, its
 // 		value used to set the next xfer id, and then it gets incremented.
-// @got_other_side_data within the XFER state is set to true only when
-//      we have received the data from the other side
-// @have_sent_our_data within the XFER state is set to true only when
-//      we have sent our data to the other side
+// @delayed_xfer_request is set to true when upper layer asked for a xfer
+//      while we were busy.
+// @wait_timeout_timer the other side wait timeout timer,
+//      it is enabled every time when we start waiting for the
+//      other side data, and is disabled every time we finish
+//      the waiting.
 struct {
 	uint32_t magic;
-	struct rpmsg_device *dev;
 	atomic_t state; 
+	struct rpmsg_device *rpdev;
+	
+	// never owns the data
 	struct full_duplex_xfer *xfer;
+
 	int next_xfer_id;
 
-	bool got_other_side_data;
-	bool have_sent_our_data;
+	bool delayed_xfer_request;
+
+	struct timer_list wait_timeout_timer;
 } fdvio_dev;
 
 /*---------------------- XFER IF COMMON METHODS ----------------------*/
@@ -214,6 +288,9 @@ void fdi_xfer_init(struct full_duplex_xfer *xfer)
 // Frees all data owned by @xfer and resets all xfer members.
 //
 // @xfer target xfer to free.
+//
+// LOCKING: doesn't lock the data, it is up to the caller to
+//     ensure that there is no data races.
 void fdi_xfer_free(struct full_duplex_xfer *xfer)
 {
 	if (IS_ERR_OR_NULL(xfer)) {
@@ -228,95 +305,45 @@ void fdi_xfer_free(struct full_duplex_xfer *xfer)
 	memset(xfer, 0, sizeof(struct full_duplex_xfer));
 }
 
-// Makes a deep copy the the xfer pointed by @src to the @dst location.
-// Data is copied as well, so one ends up with two identical xfers in
-// different locations.
-// @src the pointer to the source xfer
-// @dst the pointer to the destination xfer
-//
-// RETURNS:
-//      0: upon success
-//      <0: negated error code
-int fdi_deep_xfer_copy(struct full_duplex_xfer *src
-		, struct full_duplex_xfer *dst)
-{
-	if (IS_ERR_OR_NULL(src) || IS_ERR_OR_NULL(dst)) {
-		return -EINVAL;
-	}
-
-	fdi_xfer_free(dst);
-
-	dst->size_bytes = src->size_bytes;
-
-	if (!IS_ERR_OR_NULL(src->data_tx) && src->size_bytes) {
-		dst->data_tx = kmalloc(dst->size_bytes, GFP_KERNEL);
-		if (!dst->data_tx) {
-			goto tx_nomem;
-		}
-		memcpy(dst->data_tx, src->data_tx, dst->size_bytes);
-	}
-
-	if (!IS_ERR_OR_NULL(src->data_rx_buf) && src->size_bytes) {
-		dst->data_rx_buf = kmalloc(dst->size_bytes, GFP_KERNEL);
-		if (!dst->data_rx_buf) {
-			goto rx_nomem;
-		}
-		memcpy(dst->data_rx_buf, src->data_rx_buf, dst->size_bytes);
-	}
-
-	dst->xfers_counter = src->xfers_counter;
-	dst->id = src->id;
-	dst->consumer_data = src->consumer_data;
-	dst->done_callback = src->done_callback;
-	return 0;
-
-rx_nomem:
-	kfree(dst->data_tx);
-	dst->data_tx = NULL;
-tx_nomem:
-	dst->size_bytes = 0;
-	return -ENOMEM;
-}
-
-// Allocates storages for RX or TX data for the xfer(of xfer->size_bytes size)
-// if they were not allocated.
-// @xfer the xfer to unfold
-//
-// RETURNS:
-// 	     0: upon success
-// 	     <0: negated error code
-int fdi_xfer_unfold(struct full_duplex_xfer *xfer)
-{
-	if (IS_ERR_OR_NULL(xfer)) {
-		return -EINVAL;
-	}
-	if (!xfer->size_bytes) {
-		return 0;
-	}
-	if (IS_ERR_OR_NULL(xfer->data_tx)) {
-		xfer->data_tx = kmalloc(xfer->size_bytes, GFP_KERNEL);
-		if (!xfer->data_tx) {
-			return -ENOMEM;
-		}
-	}
-	if (IS_ERR_OR_NULL(xfer->data_rx_buf)) {
-		xfer->data_rx_buf = kmalloc(xfer->size_bytes, GFP_KERNEL);
-		if (!xfer->data_rx_buf) {
-			return -ENOMEM;
-		}
-	}
-	return 0;
-}
-
 /*---------------------- FDVIO DEVICE API ----------------------------*/
 
+// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
+// In short: this function is called by consumer driver to trigger the
+// xfer.
+// NOTE: in comparison to SymSPI we will not copy the xfer, but actually
+//     use one which is provided (expectation is that consumer will not
+//     operate the xfer data until the xfer result is available, or to update
+//     the xfer the separate xfer will be created and pointed to by @xfer
+//     here)
+// See the Full Duplex xfer interface for full description.
+//
+// STATUS:
+//     * IDLE->XFER
+// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
 int fdvio_data_xchange(void __kernel *device
                     , struct __kernel full_duplex_xfer *xfer
                     , bool force_size_change)
 {
+	CAST_DEVICE_TO_FDVIO;
+	FDVIO_CHECK_DEVICE(return -ENODEV);
+	FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
 
+	int res = __fdvio_goto_xfer(fdvio, xfer);
 
+	if (res == 0) {
+		// all fine, we have sent our data, started the timer, and moved to the
+		// XFER_RX state and started waiting for the other side data.
+		return 0;
+	} else if (res == -FDVIO_ERROR_NO_SWITCH) {
+		// there was no switch cause we're were not in idle, so we
+		// schedule the xfer later on
+		fdvio->delayed_xfer_request = true;
+		return 0;
+	}
+
+	return res;
 }
+// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
 
 int fdvio_default_data_update(void __kernel *device
                            , struct full_duplex_xfer *xfer
@@ -338,11 +365,12 @@ bool fdvio_is_running(void __kernel *device)
 //    * or if this instance was properly closed by fdvio_close(...) before.
 __maybe_unused
 int fdvio_init(void __kernel *device
-		, struct full_duplex_xfer *default_xfer)
+		, struct full_duplex_xfer *initial_xfer)
 {
     CAST_DEVICE_TO_FDVIO;
     FDVIO_CHECK_DEVICE(return -ENODEV);
     FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
+	FDVIO_CHECK_PTR(initial_xfer, return -EINVAL);
 
     // if magic matches, we treat the the structue content as meaningful,
     // otherwise we treat the structure as completely uninitialized and
@@ -369,10 +397,13 @@ int fdvio_init(void __kernel *device
 	fdi_xfer_init(&fdvio->xfer);
 
 	fdvio->next_xfer_id = 1;
-	fdvio->got_other_side_data = false;
-	fdvio->have_sent_our_data = false;
+	fdvio->delayed_xfer_request = false;
 
-	int res = fdvio_accept_data(fdvio, default_xfer);
+	// timeout timer
+	timer_setup(&fdvio->wait_timeout_timer,
+			__fdvio_other_side_wait_timeout, 0);
+
+	int res = __fdvio_accept_data(fdvio, initial_xfer);
 	if (res != 0) {
 		fdvio_err("device init failed: could not accept xfer data, stopping.");
 		goto accept_data_failed;
@@ -395,7 +426,7 @@ EXPORT_SYMBOL(fdvio_init);
 
 
 int fdvio_reset(void __kernel *device
-             , struct full_duplex_xfer *default_xfer)
+             , struct full_duplex_xfer *initial_xfer)
 {
 }
 
@@ -415,6 +446,200 @@ int fdvio_close(void __kernel *device)
 EXPORT_SYMBOL(fdvio_close);
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*---------------------- STATE SWITCHING ROUTINES --------------------*/
+
+// Returns us to IDLE state.
+void __fdvio_back_to_idle(struct fdvio_dev *fdvio)
+{
+	FDVIO_ASSERT_DEVICE();
+
+}
+
+// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
+// Switches the state from IDLE to XFER_TX and then to XFER_RX and does all
+// what is needed in XFER_TX mode.
+// @fdvio {proper ptr to fdvio dev} our device
+// @xfer the pointer to new xfer to work with (if NULL, then current xfer
+//    remains).
+// 
+// RETURNS:
+// 	0: success
+// 	<0: negated error code on failure
+//		* FDVIO_ERROR_NO_SWITCH means that there was no switch
+//		  cause we were not in idle state.
+int __fdvio_goto_xfer(
+		struct fdvio_dev *fdvio
+		, struct __kernel full_duplex_xfer *xfer)
+{
+	FDVIO_ASSERT_DEVICE();
+	FDVIO_CHECK_DEVICE(return -ENODEV);
+	FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
+
+	if (!FDVIO_SWITCH_STRICT(IDLE, XFER_TX)) {
+		return -FDVIO_ERROR_NO_SWITCH;
+	}
+
+	if (xfer != NULL) {
+		fdvio->xfer = xfer;
+	}
+
+	fdvio->delayed_xfer_request = false;
+
+	int res = rpmsg_sendto(fdvio->rpdev->ept, fdvio->xfer.data_tx
+				, fdvio->xfer.size_bytes
+				, fdvio->rpdev->dst);
+	if (res != 0) {
+		fdvio_err("The rpmsg_send 0x%x -> 0x%x, data size %d failed with"
+					" code: %d", fdvio->rpdev->src, fdvio->rpdev->dst
+					, fdvio->xfer.size_bytes, res);
+		__fdvio_goto_error_and_idle(fdvio, FDVIO_ERROR_SEND_FAILED);
+		return -FDVIO_ERROR_SEND_FAILED;
+	}
+
+	__fdvio_restart_timeout_timer(fdvio);
+
+	if (!FDVIO_SWITCH_STRICT(XFER_TX, XFER_RX)) {
+		__fdvio_goto_error_and_idle(fdvio, FDVIO_ERROR_SEND_FAILED);
+		return -FDVIO_ERROR_LOGIC;
+	}
+
+	return 0;
+}
+// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
+
+// handles the error in a sync way and goes to the IDLE state,
+// main job of the routine:
+// * to switch to the error state in a strict way
+// * stop all timers
+// * clean up the state
+// * report an error
+// * wait for silence time (usually about 50 ms)
+// * get back to IDLE state
+// @fdvio {proper ptr to fdvio dev} our device
+// @error_code the error code provided by caller
+void __fdvio_goto_error_and_idle(struct fdvio_dev *fdvio
+		, int error_code)
+{
+	// @@##@@##
+}
+
+
+/*-------------------------- TIMERS BLOCK ----------------------------*/
+
+// Helper.
+// Starts/restarts timeout timer
+//
+// CONTEXT:
+//      any
+static inline void __fdvio_restart_timeout_timer(struct fdvio_dev *fdvio)
+{
+	const unsigned long expiration_time_jf
+		= jiffies + msecs_to_jiffies(FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC);
+	mod_timer(&fdvio->wait_timeout_timer, expiration_time_jf);
+	fdvio_trace(
+		    "timer set: in %d ms, in %lu jiffies"
+		    " (at %lu jiffies), timer: %px, now: %lu jiffies"
+		    , FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC
+		    , expiration_time_jf >= jiffies ? (expiration_time_jf - jiffies) : 0
+		    , expiration_time_jf
+		    , &fdvio->wait_timeout_timer
+		    , jiffies);
+	if (timer_pending(&fdvio->wait_timeout_timer)) {
+		fdvio_trace(
+			    "timer status: pending at %lu jiffies, now: %lu jiffies"
+			    , fdvio->wait_timeout_timer.expires
+			    , jiffies);
+	} else {
+		fdvio_trace("timer status: idle");
+	};
+}
+
+// Helper.
+// Stops timeout timer. If timer function executes doesn't wait for them.
+//
+// CONTEXT:
+//      any
+static inline void __fdvio_stop_timeout_timer(struct fdvio_dev *fdvio)
+{
+	del_timer(&fdvio->wait_timeout_timer);
+	fdvio_trace("Timer stop");
+}
+
+// Helper.
+// Stops timeout timer and waits for all timer functions executions
+// are done.
+//
+// CONTEXT:
+//      sleepable
+static inline void __fdvio_stop_timeout_timer_sync(struct fdvio_dev *fdvio)
+{
+	del_timer_sync(&fdvio->wait_timeout_timer);
+	fdvio_trace("Timer stop (sync)");
+}
+
+// Launches error recovery on timeout
+static void __fdvio_other_side_wait_timeout(struct timer_list *t)
+{
+	struct fdvio_dev *fdvio = from_timer(fdvio, t, wait_timeout_timer);
+
+	FDVIO_CHECK_DEVICE(return);
+	FDVIO_CHECK_KERNEL_DEVICE(return);
+
+	__fdvio_goto_error_and_idle(fdvio, FDVIO_ERROR_OTHER_SIDE_TIMEOUT);
+}
+
+/*-------------------------- TIMERS BLOCK END ------------------------*/
+
+
+
+
+
+
+
+
+
+
+
+
+// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
+
 // Is called from rpmsg engine when we receive the inbound message from
 // somebody, who is identified by @source. The message destination corresponds
 // to the rpmsg device source address.
@@ -425,16 +650,24 @@ EXPORT_SYMBOL(fdvio_close);
 // @source the address of the source of the message.
 //
 // RETURNS:
-//		0: on success
+//		0: always
+//
+// CONTEXT: sleepable (this function might sleep)
+// 		this function is expected to be called from the workqueue
+// 		of the rpmsg device, so if any error is faced, we can handle it
+// 		right in place, without sitting for too long in the bottom half.
+//
+// STATUS:
+//     * IDLE->XFER->IDLE
 int fdvio_rpmsg_rcv_cb(struct rpmsg_device *rpdev, void *msg, int msg_len
 				, void *private_data, u32 source)
 {
 	if (IS_ERR_OR_NULL(rpdev)) {
-		pr_err("Broken pointer to the rpmsg_device in "__func__"\n");
+		pr_err("Broken ptr: rpmsg_device in "__func__"\n");
 		return -ENODEV;
 	}
 	if (IS_ERR_OR_NULL(rpdev->dev)) {
-		pr_err("Broken pointer to the rpmsg_device->dev in "__func__"\n");
+		pr_err("Broken ptr: rpmsg_device->dev in "__func__"\n");
 		return -ENODEV;
 	}
 
@@ -442,222 +675,149 @@ int fdvio_rpmsg_rcv_cb(struct rpmsg_device *rpdev, void *msg, int msg_len
 
 	FDVIO_CHECK_DEVICE(return -ENODEV);
 	FDVIO_CHECK_PTR(msg, return -EINVAL);
+	FDVIO_CHECK_PTR(rpdev->ept, return -EINVAL);
 
-	// NOTE: for now we don't filter by source
-	// TODO: ensure that it is OK or add filtering
+	// trying to initialize the new xfer, send out our data and start timer.
+	int res = __fdvio_goto_xfer(fdvio, NULL);
 
-	// the xfer kicked-off
-	if (FDVIO_SWITCH_STRICT(IDLE, XFER)) {
-		fdvio->got_other_side_data = false;
-		fdvio->have_sent_our_data = false;
+	if (res != 0 && res != -FDVIO_ERROR_NO_SWITCH) {
+		// NOTE: no error recovery here, cause it will be done by
+		// 		the __fdvio_goto_xfer routine internally
+		return 0;
 	}
 
-	// and now we 
-	if (fdvio->xfer.size_bytes) {
+	// RX sequence here
 
+	// wait for the XFER_RX state, which indicates
+	// that TX part of the sequence is done
+	while (true) {
+		if (FDVIO_STATE(XFER_TX)) {
+			break;
+		}
+		// the state drifted away, say due to error, or timeout
+		if (&fdvio->state != FDVIO_STATE_XFER_TX
+				&& &fdvio->state != FDVIO_STATE_XFER_RX) {
+			// NOTE: no error recovery here, cause if we managed to
+			// 	drift the state, this means it gone through error
+			// 	condition, so we just return.
+			return 0;
+		}
+		usleep_range(100, 200);
+	};
+
+	// now we can process our incoming data and wrap up the xfer
+
+	__fdvio_stop_timeout_timer_sync(fdvio);
+
+	// No need for secondary check to cover the case when timer was triggered
+	// in such a way that: timer set; timer triggers; timer reaches
+	// 		the error state setting;  STATE -> XFER_TX; 
+	// 		while loop unlocks; timer sets error state;
+	// cause error handling uses the switch to switch the states, not the
+	// forced switch.
+
+	if (fdvio->xfer.size_bytes != msg_len) {
+		__fdvio_goto_error_and_idle(fdvio, FDVIO_ERROR_XFER_SIZE_MISMATCH);
+		return 0;
 	}
-	memcpy(fdvio->xfer.rx_data_buf, msg, msg_len);
 
+	struct full_duplex_xfer *next_xfer = NULL;
+	bool start_immediately = false;
 
+	// NOTE: the xfer DOES NOT own the data
+	fdvio->xfer.data_rx_buf = msg;
+	if (!IS_ERR_OR_NULL(fdvio->xfer.done_callback)) {
+		next_xfer = fdvio->xfer.done_callback(
+                        &fdvio->xfer
+                        , fdvio->next_xfer_id
+                        , &start_immediately
+                        , fdvio->xfer->consumer_data);
+	}
+	// we must drop it instantly, as long as we don't own the data
+	// and client code already processed it
+	fdvio->xfer.data_rx_buf = NULL;
+	
+	if (IS_ERR(next_xfer)) {
+		fdvio_info("Device is halted by consumer request.");
+		return;
+	}
 
+	res = __fdvio_accept_data(fdvio, new_xfer);
+	if (res != 0) {
+		fdvio_err("new xfer could not be accepted, retaining original one");
+		// NOTE: nothing really to do here, we just keep the original xfer.
+	}
+	
+	FDVIO_SWITCH_STRICT(XFER_RX, IDLE);
 
+	// NOTE: this will not recurse, cause when reached the TX state
+	// 	it will send our data, start timer and return.
+	if (start_immediately || fdvio->delayed_xfer_request) {
+		fdvio_data_xchange(fdvio, NULL, false);
+	}
+
+	return 0;
 }
-
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
 
 /*------------------------------ FDVIO DEVICE ------------------------------*/
 
+
 // Increment the next xfer ID and return the original value.
+// @fdvio {proper ptr to fdvio dev} our device
 //
 // RETURNS:
 // 		the xfer id to assign to the next xfer
+// 		0: in case of failure
 int fdvio_set_next_xfer_id(struct fdvio_dev *fdvio)
 {
-	FDVIO_CHECK_DEVICE(return 0);
+	FDVIO_CHECK_DEVICE(return -1);
 
 	int res = fdvio->next_xfer_id;
 	fdvio->next_xfer_id++;
 	if (fdvio->next_xfer_id < 0) {
-		fdvio->next_xfer_id = 1;
+		fdvio->next_xfer_id = 0;
 	}
 	return res;
 }
 
 // Accepts the data given by @xfer as a transfer data (one which will
 // next to be sent if client code or other side asks for the xfer).
+// Also sets the correct Xfer ID for the xfer.
+// NOTE: If next xfer is NULL, then only updates ID.
+// NOTE: the xfer will be updated only if new one is good one
+//
 // @fdvio {VALID PTR} the fdvio device to work with.
-// @xfer {VALID PTR} the xfer to accept.
+// @xfer {VALID PTR || NULL} the xfer to accept.
 //
 // RETURNS:
 //      >=0: all fine, the id of the xfer to happen
 //      <0: negated error code
-int fdvio_accept_data(struct fdvio_dev* fdvio
+int __fdvio_accept_data(struct fdvio_dev* fdvio
 		, struct __kernel full_duplex_xfer *xfer)
 {
 	FDVIO_CHECK_DEVICE(return -ENODEV);
-	FDVIO_CHECK_PTR(xfer, return -EINVAL);
 
-	int res = fdi_deep_xfer_copy(xfer, &fdvio->xfer);
-	if (res < 0) {
-		return res;
+	if (!IS_ERR_OR_NULL(xfer)) {
+		if (xfer->size_bytes == 0) {
+			fdvio_error("0-sized xfer provided by consumer");
+			return -EINVAL;
+		}
+		if (IS_ERR_OR_NULL(xfer->data_tx)) {
+			fdvio_error("broken xfer TX data ptr provided by consumer");
+			return -EINVAL;
+		}
+		fdvio->xfer = xfer;
+		return;
 	}
 
-	res = fdi_xfer_unfold(&mirror->xfer);
-	if (res < 0) {
-		return res;
-	}
+	fdvio->xfer.id = fdvio_set_next_xfer_id(fdvio);
 
 	return fdvio->xfer.id;
 }
+// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
 
 // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
 
-
-// Called
-static void mirror_postprocessing_sequence(struct work_struct *work)
-{
-	struct mirror_xfer_device *mirror = container_of(work
-			, struct mirror_xfer_device
-			, postprocessing_work);
-
-	if (!mirror->xfer.done_callback) {
-		return;
-	}
-
-	bool start_immediately = false;
-	struct full_duplex_xfer *next_xfer
-			= mirror->xfer.done_callback(
-				&mirror->xfer
-				, mirror->next_xfer_id
-				, &start_immediately
-				, mirror->xfer.consumer_data);
-
-	if (IS_ERR(next_xfer)) {
-		fdmirror_info("Device is halted by consumer request.");
-		return;
-	}
-
-	if (next_xfer && fdvio_accept_data(mirror, next_xfer) < 0) {
-		fdmirror_warn("no memory");
-		return;
-	}
-
-	if (start_immediately) {
-		schedule_work(&mirror->postprocessing_work);
-	} else {
-		mirror->in_xfer = false;
-	}
-}
-
-int __mirror_default_data_update_sequence(
-		struct mirror_xfer_device *mirror
-		, struct full_duplex_xfer *xfer
-		, bool force_size_change)
-{
-	FDMIRROR_CHECK_PTR(mirror, return -EINVAL);
-	FDMIRROR_CHECK_PTR(xfer, return -EINVAL);
-	FDMIRROR_MIRROR_ON_FINISH(return -EHOSTDOWN);
-
-	bool expected_state = false;
-	bool dst_state = true;
-	bool res = __atomic_compare_exchange_n(&mirror->in_xfer
-			, &expected_state, dst_state, false
-			, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-
-	if (!res) {
-		fdmirror_warn("xfer devicce is busy");
-		return -EALREADY;
-	}
-
-	if (xfer->size_bytes != mirror->xfer.size_bytes
-			&& !force_size_change) {
-		fdmirror_warn("will not change xfer size");
-		return -EINVAL;
-	}
-
-	return fdvio_accept_data(mirror, xfer);
-}
-
-/*------------------- MIRROR DEVICE API ----------------------------*/
-
-// API
-//
-// See struct full_duplex_interface description.
-__maybe_unused
-int mirror_data_xchange(void __kernel *device
-		, struct __kernel full_duplex_xfer *xfer
-		, bool force_size_change)
-{
-	FDMIRROR_DEV_TO_MIRROR;
-	FDMIRROR_CHECK_DEVICE(device, return -ENODEV);
-	FDMIRROR_MIRROR_ON_FINISH(return -EHOSTDOWN);
-
-	int accept_res = 0;
-	if (xfer != NULL) {
-		accept_res = __mirror_default_data_update_sequence(
-					mirror, xfer
-					, force_size_change);
-	}
-	if (accept_res >= 0) {
-		schedule_work(&mirror->postprocessing_work);
-	}
-
-	return accept_res;
-}
-EXPORT_SYMBOL(mirror_data_xchange);
-
-// API
-//
-// See struct full_duplex_interface description.
-__maybe_unused
-int mirror_default_data_update(void __kernel *device
-		, struct full_duplex_xfer *xfer
-		, bool force_size_change)
-{
-	FDMIRROR_DEV_TO_MIRROR;
-	FDMIRROR_CHECK_DEVICE(device, return -ENODEV);
-	FDMIRROR_MIRROR_ON_FINISH(return -EHOSTDOWN);
-	if (IS_ERR(xfer)) {
-		return -EINVAL;
-	}
-
-	int accept_res = __mirror_default_data_update_sequence(
-				mirror, xfer
-				, force_size_change);
-
-	if (accept_res >= 0) {
-		mirror->in_xfer = false;
-	}
-
-	return accept_res;
-}
-EXPORT_SYMBOL(mirror_default_data_update);
-
-// API
-//
-// See struct full_duplex_interface description.
-__maybe_unused
-bool mirror_is_running(void __kernel *device)
-{
-	FDMIRROR_DEV_TO_MIRROR;
-	FDMIRROR_CHECK_DEVICE(device, return false);
-	FDMIRROR_MIRROR_ON_FINISH(return false);
-	return mirror->running;
-}
-EXPORT_SYMBOL(mirror_is_running);
-
-
-// API
-//
-// See struct full_duplex_interface description.
-__maybe_unused
-int mirror_reset(void __kernel *device
-		, struct full_duplex_xfer *default_xfer)
-{
-	mirror_close(device);
-	return mirror_init(device, default_xfer);
-}
-EXPORT_SYMBOL(mirror_reset);
 
 /*------------ FULL DUPLEX INTERFACES DEFINITION -------------------*/
 
@@ -729,15 +889,9 @@ static int fdvio_probe(struct rpmsg_device *rpdev)
 	}
 
 	dev_set_drvdata(rpdev->dev, fdvio);
+	fdvio->rpdev = rpdev;
 
-	// NOTE: the default xfer is set to be empty, when the master driver
-	//  comes, it will set the proper xfer.
-	struct full_duplex_xfer def_xfer = {0};
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
-// TODO: add the default xfer callbacks?
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
-
-	res = fdvio_init(fdvio, &def_xfer);
+	res = fdvio_init(fdvio, NULL);
 	if (!res) {
 		dev_err(&rpdev-dev, "fdvio: initialization failed: errno: %d\n"
 				, res);
