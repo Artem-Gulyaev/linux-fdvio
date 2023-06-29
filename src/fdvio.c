@@ -1,4 +1,3 @@
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
 /*
  * This file provides a full-duplex symmetrical VirtIO device (Fdvio driver)
  * to execute symmetrical full-duplex communication on top of the rpmsg
@@ -178,8 +177,9 @@
 // The cold-and-dark state of the driver - before initialization was even
 // carried out.
 #define FDVIO_STATE_COLD 0
-// First state after COLD. We enter it right upon the initialization start.
-#define FDVIO_STATE_INITIALIZING 1
+// First state after COLD. We enter it when device is initialized but
+// not yet started.
+#define FDVIO_STATE_INITIALIZED 1
 // Last state before COLD. We enter it right upon the shut down start.
 #define FDVIO_STATE_SHUTTING_DOWN 2
 // State, when nothing is happening, no one waits for anything, no tranfers
@@ -241,6 +241,10 @@
 #define FDVIO_ERROR_SEND_FAILED 6
 // Should not happen, unless there is a bug
 #define FDVIO_ERROR_LOGIC 7
+// The method, function not implemented
+#define FDVIO_ERROR_NOT_IMPLEMENTED 8
+// No current xfer provided
+#define FDVIO_ERROR_NO_XFER 9
 
 
 // The device itself
@@ -273,25 +277,9 @@ struct {
 	struct timer_list wait_timeout_timer;
 } fdvio_dev;
 
-/*---------------------- XFER IF COMMON METHODS ----------------------*/
-
-// TODO: all methods of xfer reallocation can be moved to the
-//      general xfer methods (at least consider this);
-
-
-// Initializes the xfer data to the default empty state
-// @xfer target xfer to reset.
-void fdi_xfer_init(struct full_duplex_xfer *xfer)
-{
-	if (IS_ERR_OR_NULL(xfer)) {
-		return;
-	}
-	memset(xfer, 0, sizeof(struct full_duplex_xfer));
-}
 
 /*---------------------- FDVIO DEVICE API ----------------------------*/
 
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
 // In short: this function is called by consumer driver to trigger the
 // xfer.
 // NOTE: in comparison to SymSPI we will not copy the xfer, but actually
@@ -303,7 +291,7 @@ void fdi_xfer_init(struct full_duplex_xfer *xfer)
 //
 // STATUS:
 //     * IDLE->XFER
-// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
+__maybe_unused
 int fdvio_data_xchange(void __kernel *device
                     , struct __kernel full_duplex_xfer *xfer
                     , bool force_size_change)
@@ -327,145 +315,151 @@ int fdvio_data_xchange(void __kernel *device
 
 	return res;
 }
-// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
+EXPORT_SYMBOL(fdvio_data_xchange);
 
+// Updates the default data. Not used by ICComm and probably
+// will be dropped later in IF.
+__maybe_unused
 int fdvio_default_data_update(void __kernel *device
                            , struct full_duplex_xfer *xfer
                            , bool force_size_change)
 {
-}
+	CAST_DEVICE_TO_FDVIO;
+	FDVIO_CHECK_DEVICE(return -ENODEV);
+	FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
+	(void)(xfer);
+	(void)(force_size_change);
 
+	fdvio_err("Not implemented, cause not used.");
+
+	return 0;
+}
+EXPORT_SYMBOL(fdvio_default_data_update);
+
+// RETURNS: true if fdvio is in one of running states
+__maybe_unused
 bool fdvio_is_running(void __kernel *device)
 {
+	int32_t st = FDVIO_STATE();
+	return (st != FDVIO_STATE_COLD) && (st != FDVIO_STATE_SHUTTING_DOWN)
+		&& (st != FDVIO_STATE_INITIALIZED);
 }
+EXPORT_SYMBOL(fdvio_is_running);
 
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
 // API
-// Short: initializes the fdvio device and prepares it for work.
-// For long description, see struct full_duplex_interface description.
+// Short: starts the initialized fdvio device. Basically really launches
+// 		it. After this call returns successfully, one can receive the
+// 		messages from the other side.
 //
-// THREADING: on the same instance init can be called **only**
-//    * if it is a brand newly created instance (no work was done on it yet),
-//    * or if this instance was properly closed by fdvio_close(...) before.
+// @device {valid ptr to initialized device}  the already allocated and
+//      initialized fdvio_dev.
+// @initial_xfer {valid ptr to the valid xfer} the proper valid xfer pointer
 __maybe_unused
-int fdvio_init(void __kernel *device
+int fdvio_start(void __kernel *device
 		, struct full_duplex_xfer *initial_xfer)
 {
     CAST_DEVICE_TO_FDVIO;
     FDVIO_CHECK_DEVICE(return -ENODEV);
     FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
+	FDVIO_CHECK_PTR(fdvio->rpdev, return -ENODEV);
 	FDVIO_CHECK_PTR(initial_xfer, return -EINVAL);
 
-    // if magic matches, we treat the the structue content as meaningful,
-    // otherwise we treat the structure as completely uninitialized and
-	// containing random garbage.
-	//
-	// NOTE: it is surely not a protection from an indended multithreading
-	// 	initialization, only to catch some bugs mainly.
-    if (fdvio->magic != FDVIO_MAGIC) {
-		fdvio_info("starting initialization of device");
-		fdvio->magic = FDVIO_MAGIC;
-		FDVIO_SWITCH_FORCED(INITIALIZING);
-	} else {
-		fdvio_notice("target device magic already set")
-		if (FDVIO_SWITCH_STRICT(COLD, INITIALIZING)) {
-			fdvio_info("starting re-initialization of device");
-		} else {
-			fdvio_error("attempt to initialize non-cold device,"
-					    " for now I will continue, but if it is not a"
-						" accidental magic match, check your code!");
-			FDVIO_SWITCH_FORCED(INITIALIZING);
-		}
+	fdvio_info("starting device: %px", device);
+
+	int32_t st = FDVIO_STATE();
+	if (FDVIO_STATE() != FDVIO_STATE_INITIALIZED) {
+		fdvio_info("Device must be in initialized state: %px, can not start."
+					, device);
+		return -EFAULT;
 	}
-
-	fdi_xfer_init(&fdvio->xfer);
-
-	fdvio->next_xfer_id = 1;
-	fdvio->delayed_xfer_request = false;
-
-	// timeout timer
-	timer_setup(&fdvio->wait_timeout_timer
-			, __fdvio_other_side_wait_timeout_handler, 0);
 
 	int res = __fdvio_accept_data(fdvio, initial_xfer);
 	if (res != 0) {
-		fdvio_err("device init failed: could not accept xfer data, stopping.");
 		goto accept_data_failed;
 	}
 
-	if (!FDVIO_SWITCH_STRICT(INITIALIZING, IDLE)) {
-		BUG_ON(true);
+	if (!FDVIO_SWITCH_STRICT(INITIALIZED, IDLE)) {
+		fdvio_info("Failed to switch INITIALIZED->INIT: %px, can not start."
+					, device);
+		res = -EFAULT;
+		goto switch_failed;
 	}
 
-	fdvio_info("fdvio device initialized");
+	fdvio_info("fdvio device initialized: %px", device);
 	return 0;
 
+switch_failed:
+	fdvio->xfer = NULL;
 accept_data_failed:
-	FDVIO_SWITCH_FORCED(COLD);
 	return res;
 }
-EXPORT_SYMBOL(fdvio_init);
-
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
-
-
-int fdvio_reset(void __kernel *device
-             , struct full_duplex_xfer *initial_xfer)
-{
-}
+EXPORT_SYMBOL(fdvio_start);
 
 // API
 //
 // Closes the device.
 // See struct full_duplex_interface description for more info.
+// RETURNS:
+// 		>=0: all ok even if device is already or closed
+// 			or never initialized
+// 		<0: negated error code
 __maybe_unused
-int fdvio_close(void __kernel *device)
+int fdvio_stop(void __kernel *device)
 {
-	
+    CAST_DEVICE_TO_FDVIO;
+    FDVIO_CHECK_DEVICE(return -ENODEV);
+    FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
+	FDVIO_CHECK_PTR(fdvio->rpdev, return -ENODEV);
 
+	fdvio_info("fdvio device (%px) stopping ...", device);
 
+	if (fdvio->magic != FDVIO_MAGIC) {
+		fdvio_info("dev magic doesn't match, will skip closing.");
+		return 0
+	}
 
+	while (true) {
+		int32_t st = FDVIO_STATE();
+		if (st == FDVIO_STATE_COLD) {
+			fdvio_warn("We're already cold and dark, will not stop.");
+			return 0;
+		}
+		if (st == FDVIO_STATE_SHUTTING_DOWN) {
+			fdvio_warn("We're already going down, will not stop.");
+			return -EBUSY;
+		}
+		if (st == FDVIO_STATE_INITIALIZED) {
+			fdvio_warn("Already stopped.");
+			return -EBUSY;
+		}
+
+		if (FDVIO_SWITCH_STRICT(XFER_TX, SHUTTING_DOWN)
+				|| FDVIO_SWITCH_STRICT(XFER_RX, SHUTTING_DOWN)
+				|| FDVIO_SWITCH_STRICT(ERROR, SHUTTING_DOWN)
+				|| FDVIO_SWITCH_STRICT(IDLE, SHUTTING_DOWN)) {
+			break;
+		}
+	}
+
+	__fdvio_stop_timeout_timer_sync(fdvio);
+
+	fdvio->xfer = NULL;
+
+	FDVIO_SWITCH_STRICT(SHUTTING_DOWN, INITIALIZED);
+	fdvio_info("fdvio device stopped: %px", device);
 }
-EXPORT_SYMBOL(fdvio_close);
+EXPORT_SYMBOL(fdvio_stop);
 
+// Just reset it. Stop and start it again.
+__maybe_unused
+int fdvio_reset(void __kernel *device
+             , struct full_duplex_xfer *initial_xfer)
+{
+	fdvio_stop(device, initial_xfer);
+	return fdvio_start(device);
+}
+EXPORT_SYMBOL(fdvio_reset);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
 
 /*---------------------- STATE SWITCHING ROUTINES --------------------*/
 
@@ -492,13 +486,21 @@ int __fdvio_goto_xfer(
 		return -FDVIO_ERROR_NO_SWITCH;
 	}
 
-	if (xfer != NULL) {
-		fdvio->xfer = xfer;
+	int res = __fdvio_accept_data(fdvio, xfer);
+	if (res != 0) {
+		fdvio_err("new xfer could not be accepted, retaining original one");
+		// NOTE: nothing really to do here, we just keep the original xfer.
+	}
+
+	if (IS_ERR_OR_NULL(fdvio->xfer)) {
+		fdvio_err("current xfer is NULL, going back to IDLE")
+		FDVIO_SWITCH_STRICT(XFER_TX, IDLE);
+		return -FDVIO_ERROR_NO_XFER;
 	}
 
 	fdvio->delayed_xfer_request = false;
 
-	int res = rpmsg_sendto(fdvio->rpdev->ept, fdvio->xfer.data_tx
+	res = rpmsg_sendto(fdvio->rpdev->ept, fdvio->xfer.data_tx
 				, fdvio->xfer.size_bytes
 				, fdvio->rpdev->dst);
 	if (res != 0) {
@@ -531,7 +533,7 @@ int __fdvio_goto_xfer(
 // @error_code the error code provided by caller
 //
 // NOTE: for now, doesn't handle the startup/shutdown states,
-// 		like COLD, INITIALIZING, SHUTTING_DOWN - not expected to be needed.
+// 		like COLD, INITIALIZED, SHUTTING_DOWN - not expected to be needed.
 void __fdvio_goto_error_and_idle(struct fdvio_dev *fdvio
 		, int error_code)
 {
@@ -541,9 +543,9 @@ void __fdvio_goto_error_and_idle(struct fdvio_dev *fdvio
 	while (true) {
 		int32_t st = FDVIO_STATE();
 		if (st == FDVIO_STATE_COLD
-				|| st == FDVIO_STATE_INITIALIZING
+				|| st == FDVIO_STATE_INITIALIZED
 				|| st == FDVIO_STATE_SHUTTING_DOWN
-				|| st == FDVIO_STATE_SHUTTING_IDLE) {
+				|| st == FDVIO_STATE_IDLE) {
 			fdvio_warn("%d state not to be recovered.", st);
 			return;
 		}
@@ -554,12 +556,20 @@ void __fdvio_goto_error_and_idle(struct fdvio_dev *fdvio
 
 		if (FDVIO_SWITCH_STRICT(XFER_TX, ERROR)
 					|| FDVIO_SWITCH_STRICT(XFER_RX, ERROR)) {
+
+			fdvio_error("Recovering from the error: %d", error_code);
+
 			// stop timer
 			__fdvio_stop_timeout_timer_sync(fdvio);
 
 			// wait idle-on-error time, which also signals our error state to the
 			// other side
-			msleep(FDVIO_ERROR_SILENCE_TIME_MSEC);
+			// NOTE: we idling only if the error is not the size mismatch,
+			//     cause size mismatch can be instantly processed, cause
+			//     both sides see it the same.
+			if (error_code != FDVIO_ERROR_XFER_SIZE_MISMATCH) {
+				msleep(FDVIO_ERROR_SILENCE_TIME_MSEC);
+			}
 
 			// NOTE:
 			// HERE ONE CAN ADD SENDING SOME ERROR INDICATION
@@ -819,13 +829,14 @@ int __fdvio_set_next_xfer_id(struct fdvio_dev *fdvio)
 // Also sets the correct Xfer ID for the xfer.
 // NOTE: If next xfer is NULL, then only updates ID.
 // NOTE: the xfer will be updated only if new one is good one
+// NOTE: if both NULL - just returns.
 //
 // @fdvio {VALID PTR} the fdvio device to work with.
 // @xfer {VALID PTR || NULL} the xfer to accept.
 //
 // RETURNS:
-//      >=0: all fine, the id of the xfer to happen
-//      <0: negated error code
+//      <0: negated error code (if new xfer is bad)
+//      >=0: else
 int __fdvio_accept_data(struct fdvio_dev* fdvio
 		, struct __kernel full_duplex_xfer *xfer)
 {
@@ -841,52 +852,128 @@ int __fdvio_accept_data(struct fdvio_dev* fdvio
 			return -EINVAL;
 		}
 		fdvio->xfer = xfer;
-		return;
+	}
+
+	if (IS_ERR_OR_NULL(fdvio->xfer)) {
+		return 0;
 	}
 
 	fdvio->xfer.id = __fdvio_set_next_xfer_id(fdvio);
 
 	return fdvio->xfer.id;
 }
-// @@@@@@@@@@@@@@@@@@@@@@@@@@-----2023-06-----@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
 
-/*------------ FULL DUPLEX INTERFACES DEFINITION -------------------*/
+// Short: initializes the fdvio device and prepares it for work.
+// But it doesn't start it (cause no default xfer is provided).
+// Is to be called by kernel (in probe) when corresponding device is
+// detected.
+// NOTE: it finishes with device in INITIALIZED state. Then consumer
+//    must call the fdvio_start to actually start it.
+// @device {valid allocated fdvio_dev ptr}  the already allocated
+//    fdvio_dev struct with rpdev ptr set.
+//
+// THREADING: on the same instance init can be called **only**
+//    * if it is a brand newly created instance (no work was done on it yet),
+//    * or if this instance was properly closed by __fdvio_close(...) before.
+int __fdvio_init(void __kernel *device)
+{
+    CAST_DEVICE_TO_FDVIO;
+    FDVIO_CHECK_DEVICE(return -ENODEV);
+    FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
+	FDVIO_CHECK_PTR(fdvio->rpdev, return -ENODEV);
 
-const struct full_duplex_sym_iface mirror_duplex_iface = {
-	.data_xchange = &mirror_data_xchange
-	, .default_data_update = &mirror_default_data_update
-	, .is_running = &mirror_is_running
-	, .init = &mirror_init
-	, .reset = &mirror_reset
-	, .close = &mirror_close
+	fdvio_info("starting initialization of device: %px", device);
+	if (fdvio->magic == FDVIO_MAGIC) {
+		fdvio_warn("Note, the magic already matches.");
+	};
+	fdvio->magic = FDVIO_MAGIC;
+	FDVIO_SWITCH_FORCED(COLD);
+
+	fdvio->xfer = NULL;
+
+	fdvio->next_xfer_id = 1;
+	fdvio->delayed_xfer_request = false;
+
+	// timeout timer
+	timer_setup(&fdvio->wait_timeout_timer
+			, __fdvio_other_side_wait_timeout_handler, 0);
+
+	FDVIO_SWITCH_STRICT(COLD, INITIALIZED);
+
+	fdvio_info("fdvio device initialized: %px", device);
+	return 0;
+}
+
+// API
+//
+// Closes the device.
+// See struct full_duplex_interface description for more info.
+// RETURNS:
+// 		>=0: all ok even if device is already or closed
+// 			or never initialized
+// 		<0: negated error code
+__maybe_unused
+int __fdvio_close(void __kernel *device)
+{
+    CAST_DEVICE_TO_FDVIO;
+    FDVIO_CHECK_DEVICE(return -ENODEV);
+    FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
+	FDVIO_CHECK_PTR(fdvio->rpdev, return -ENODEV);
+
+	fdvio_info("closing dev: %px", device);
+
+	int32_t st = FDVIO_STATE();
+	if (st != FDVIO_STATE_INITIALIZED) {
+		fdvio_err("Can't close dev: dev is not in INITIALIZED state.");
+		return -EFAULT;
+	}
+
+	FDVIO_SWITCH_STRICT(INITIALIZED, COLD);
+	fdvio->magic = 0;
+
+	fdvio_info("closed dev: %px", device);
+
+	return 0;
+}
+EXPORT_SYMBOL(fdvio_stop);
+
+
+/*----------- FDVIO FULL DUPLEX INTERFACE DEFINITION ---------------*/
+
+const struct full_duplex_sym_iface fdvio_duplex_iface = {
+	.data_xchange = &fdvio_data_xchange
+	, .default_data_update = &fdvio_default_data_update
+	, .is_running = &fdvio_is_running
+	, .init = &fdvio_start
+	, .reset = &fdvio_reset
+	, .close = &fdvio_stop
 };
 
 // API
 //
 // Returns ptr to the full duplex device interface object
-// which defines mirror device interface.
+// which defines fdvio device interface.
 //
 // RETURNS:
 //      valid ptr to struct full_duplex_sym_iface with all
 //      fields filled
 __maybe_unused
-const struct full_duplex_sym_iface *full_duplex_mirror_iface(void)
+const struct full_duplex_sym_iface *full_duplex_fdvio_iface(void)
 {
-	return &mirror_duplex_iface;
+	return &fdvio_duplex_iface;
 }
-EXPORT_SYMBOL(full_duplex_mirror_iface);
+EXPORT_SYMBOL(full_duplex_fdvio_iface);
 
-/* --------------------- MODULE HOUSEKEEPING SECTION ------------------- */
+/* --------------------- DRIVER PROBING / REMOVAL ---------------------- */
 
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V BEGIN
 // API
 //
 // This guy gets called when kernel finds a new device on the rpmsg bus,
 // or when our driver has just been plugged in.
 // @dev the detected device
 //
-// NOTE: the client driver will be attached later on, the fdvio init goes
-//      without client driver available, the default xfer is 0 (0 size).
+// NOTE: we don't start the device, we create it, and wait for the consumer
+//     code to start us, cause we can not work without consumer.
 //
 // RETURNS: 
 //      0: success
@@ -922,7 +1009,8 @@ static int fdvio_probe(struct rpmsg_device *rpdev)
 	dev_set_drvdata(rpdev->dev, fdvio);
 	fdvio->rpdev = rpdev;
 
-	res = fdvio_init(fdvio, NULL);
+	res = __fdvio_init(fdvio);
+	fdvio_info("Fdvio device created: %px", fdvio);
 	if (!res) {
 		dev_err(&rpdev-dev, "fdvio: initialization failed: errno: %d\n"
 				, res);
@@ -961,17 +1049,21 @@ static void fdvio_remove(struct rpmsg_channel *rpdev)
 						" It will not be a graceful close.\n");
 		res = -ENODEV;
 	} else {
-		res = fdvio_close(fdvio);
+		res = __fdvio_close(fdvio);
 
 		if (!res) {
-			dev_err(&rpdev->dev, "fdvio: fdvio_close failed, errno: %d\n", res);
+			dev_err(&rpdev->dev, "fdvio: __fdvio_close failed, errno: %d\n", res);
 		}
 	}
 
 	dev_set_drvdata(rpdev->dev, NULL);
+	kfree(fdvio);
 
-	dev_err(&rpdev->dev, "fdvio: closed with result: %d\n", res);
+	dev_err(&rpdev->dev, "fdvio: closed (old ptr: %px) with result: %d\n"
+			, fdvio, res);
 }
+
+/* --------------------- MODULE HOUSEKEEPING SECTION ------------------- */
 
 static struct rpmsg_device_id fdvio_id_table[] = {
 	{ .name = "fdvio", .driver_data = 0 }
@@ -995,4 +1087,3 @@ MODULE_DESCRIPTION("Full duplex VirtIO (rpmsg-based) device");
 MODULE_AUTHOR("Artem Gulyaev <Artem.Gulyaev@bosch.com>");
 MODULE_LICENSE("GPL v2");
 
-// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ V END
