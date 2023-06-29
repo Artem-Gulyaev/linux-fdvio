@@ -169,9 +169,13 @@
 //
 
 // The timeout for waiting for the other side data after we have sent our.
-#define FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 10
+#ifndef FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC
+    #define FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 10
+#endif
 // How much time we sleep ignoring all if error occured
-#define FDVIO_ERROR_SILENCE_TIME_MSEC 50
+#ifndef FDVIO_ERROR_SILENCE_TIME_MSEC
+    #define FDVIO_ERROR_SILENCE_TIME_MSEC 50
+#endif
 
 
 // The cold-and-dark state of the driver - before initialization was even

@@ -1,0 +1,31 @@
+config BOSCH_FDVIO_DRIVER
+    tristate "Bosch Full Duplex VirtIO driver"
+    depends on BOSCH_DRIVERS
+    default y
+    ---help---
+        The driver for implementation of the Full-duplex transport on top
+        of the VirtIO (rpmsg) facility. It provides an ability to the
+        ICCom stack to talk via VirtIO transport.
+
+        If unsure, say N.
+
+config BOSCH_FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 
+    int "The for how long to wait for data from the other side [ms]."
+    depends on BOSCH_FDVIO_DRIVER
+    default 20
+    ---help---
+        Defines for how long should the Fdvio driver to wait for the
+        data from the other side, before reporting an error to the consumer
+        layer. It is better to react relatively fast, so the issue can be
+        tackled fast, but not too fast to start catching just ordinary
+        latency delays.
+
+config BOSCH_FDVIO_ERROR_SILENCE_TIME_MSEC
+    int "How long to keep silence after error [ms]."
+    depends on BOSCH_FDVIO_DRIVER
+    default 50
+    ---help---
+        Defines for how long should the Fdvio driver to keep silence
+        and drop all external requests after error. This allows us
+        to indicate to the other side that we had an error and also
+        potentially purge all underlying transports.
