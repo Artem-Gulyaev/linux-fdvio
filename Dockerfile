@@ -19,6 +19,7 @@ COPY . .
 
 # Workqueue - use the system WQ
 RUN make -C ${kernel_source_dir_x86} M=${repo_path} \
+        CONFIG_BOSCH_DRIVERS=y \
         CONFIG_BOSCH_FDVIO_DRIVER=m \
         CONFIG_CHECK_SIGNATURE=n \
         && rm -rf ${repo_path}/*

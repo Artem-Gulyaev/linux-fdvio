@@ -11,5 +11,5 @@ endif
 
 ccflags-y += -DBOSCH_FDVIO_DRIVER_VERSION=$(CONFIG_BOSCH_FDVIO_DRIVER_VERSION)
 
-obj-$(CONFIG_BOSCH_FDVIO) += src/fdvio.o
+obj-$(CONFIG_BOSCH_FDVIO_DRIVER) += src/fdvio.o
 

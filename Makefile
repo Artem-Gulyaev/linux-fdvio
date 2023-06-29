@@ -16,6 +16,7 @@ DOCKER_OUT_TEST_IMAGE_TAG = fdvio-test
 # Creates the Fdvio test Build
 default:
 	$(MAKE) -C ${KDIR_LOCAL} M=$$PWD \
+		CONFIG_BOSCH_DRIVERS=y \
 		CONFIG_BOSCH_FDVIO_DRIVER=m \
 		CONFIG_BOSCH_FDVIO_DRIVER_VERSION=$(git rev-parse HEAD) \
 		CONFIG_BOSCH_FD_TEST_TRANSPORT=m
