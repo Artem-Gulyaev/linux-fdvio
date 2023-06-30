@@ -562,7 +562,7 @@ int __fdvio_goto_xfer(
 				, fdvio->xfer->size_bytes
 				, fdvio->rpdev->dst);
 	if (res != 0) {
-		fdvio_err("The rpmsg_send 0x%x -> 0x%x, data size %ld failed with"
+		fdvio_err("The rpmsg_send 0x%x -> 0x%x, data size %zu failed with"
 					" code: %d", fdvio->rpdev->src, fdvio->rpdev->dst
 					, fdvio->xfer->size_bytes, res);
 		__fdvio_goto_error_and_idle(fdvio, FDVIO_ERROR_SEND_FAILED);
