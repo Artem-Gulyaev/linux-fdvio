@@ -8,6 +8,20 @@ FROM bosch-linux-full-duplex-interface:latest AS fdvio
 ARG kernel_source_dir_x86=/repos/linux_x86/
 ARG kernel_source_dir_arm=/repos/linux_arm/
 
+##  Prepare the compatible Linux kernels first
+
+# x86
+RUN cd /repos/linux_x86
+COPY ./vm/linux-config/x86.config  /repos/linux_x86/.config
+RUN make_apply_linux_x86
+
+# ARM
+RUN cd /repos/linux_arm
+COPY ./vm/linux-config/arm.config  /repos/linux_arm/.config
+RUN make_apply_linux_arm
+
+##  Prepare the fdvio sources
+
 ENV repo_path=/repos/linux-fdvio
 RUN rm -rf ${repo_path} && mkdir -p ${repo_path}
 
