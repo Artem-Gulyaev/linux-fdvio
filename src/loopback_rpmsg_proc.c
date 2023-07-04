@@ -515,6 +515,9 @@ struct virtproc_info {
 #define to_lbrp_rpmsg_channel_dev(_lbrp_ch_dev_ptr) \
 	container_of(_lbrp_ch_dev_ptr, struct lbrp_rpmsg_channel_dev, rpdev)
 
+
+#define LBRP_MAX_EPT_FILE_NAME_SIZE 20
+
 //
 // struct rpmsg_ns_msg - dynamic name service announcement message
 // @name: name of remote service that is published
@@ -540,22 +543,49 @@ struct rpmsg_announcement_entry {
 };
 
 ////////////////////--------------------////////////////////    VERIFIED END
+
+// @list_anchor the anchor to embed the structure in the list
+// @src the address of the source of this message
+// @data the msg data
+// @data_len_bytes data length in bytes
+struct __lbrp_remote_ept_msg {
+	struct list_head list_anchor;
+    uint32_t src;
+    char *data;
+    size_t data_len_bytes;
+};
+
 // represents the remote endpoint 
+// @addr own address of the endpoint
+// @list_anchor the anchor to embed the structure in the list
+// @msgs_head the head of the incoming messages list
+// @msgs_lock the incoming messages list lock
+// @sysfs_attr sysfs attribute, also contains the file name and file mode
 struct __lbrp_remote_ept {
-    uint32_t  addr;
-
-
+    uint32_t addr;
+	struct list_head list_anchor;
+	struct list_head rx_msgs_head;
+	struct mutex rx_msgs_lock;
+    struct attribute sysfs_attr;
 };
  
 // represents the remote service
 // @kobj the kernel object accociated
+//      NOTE: the parent object of this kobject is the lb_rpmsg_proc_dev
+//              device.
 // @list_anchor just as it is, to embed the service into a list of all
 //      services.
 // @name the service name
+// @epts_head the head of the endpoints of the service (its own endpoints,
+//      they have nothing to do with our local endpoints), the entries of
+//      the list are __lbrp_remote_ept records.
+// @epts_lock service own endpoints lock
 struct __lbrp_remote_service {
     struct kobject kobj;
 	struct list_head list_anchor;
     char name[RPMSG_NAME_SIZE];
+	struct list_head epts_head;
+	struct mutex epts_lock;
 };
 
 // Describes the loopback rpmsg proc device.
@@ -618,6 +648,13 @@ struct lbrp_rpmsg_channel_dev {
 //          ./ept_ADDR1      -> represents a single remote endpoint
 //                              you can RW this file to get/send messages
 //                              through this endpoint.
+//
+//                              * to read one incoming message out of queue
+//                                just read() on this ept, you will get
+//                                the: 4 bytes of src addr +  raw payload
+//
+//                              * to write the message use write() with following
+//                                format: 4 bytes of dst addr + raw payload.
 //          ./ept_ADDR2
 //          ...
 //          ./ept_ADDRM
@@ -826,10 +863,10 @@ static ssize_t create_ept_store(
 		struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-    char *channel_name = strim(strsep(buf, " "));
+    char *service_name = strim(strsep(buf, " "));
     char *addr_str = strim(buf);
 
-    if (IS_ERR_OR_NULL(addr_str) || IS_ERR_OR_NULL(channel_name)) {
+    if (IS_ERR_OR_NULL(addr_str) || IS_ERR_OR_NULL(service_name)) {
         goto wrong_usage;
     }
 
@@ -845,20 +882,14 @@ static ssize_t create_ept_store(
         goto done;
     }
 
+    struct __lbrp_remote_service *rservice = __lbrp_create_remote_service(
+                                                               lbrp, name);
+
+    if (IS_ERR_OR_NULL(rservice)) {
+        goto done;
+    }
 ////////////////////--------------------////////////////////    VERIFIED END
 
-    mutex_lock(&lbrp->remote_services_lock);
-    // check if service is there already
-    struct __lbrp_remote_service *rservice = NULL;
-    bool exists = false;
-    list_for_each_entry_from(rservice, &lbrp->remote_services, list_anchor) {
-        if (strncmp(channel_name, rservice->name, sizeof(rservice->name)) == 0) {
-            exists = true;
-            break;
-        }
-    }
-    
-    mutex_unlock(&lbrp->remote_services_lock);
 
 
 
@@ -897,8 +928,208 @@ static DEVICE_ATTR_WO(create_ept);
 
 ////////////////////--------------------////////////////////    VERIFIED BEGIN
 
+// Creates/gets an endpoint with given own address for the given service.
+// NOTE: if endpoint already exists is is not an error.
+//
+// RETURNS:
+//      !NULL: newly created or found endpoint
+//      NULL: if error occured
+struct __lbrp_remote_ept *__lbrp_create_remote_ept(
+            struct __lbrp_remote_service *service
+            , uint32_t own_address)
+{
+    if (IS_ERR_OR_NULL(service)) {
+        pr_err("No service to add ept.");
+        return NULL;
+    }
+
+    struct lb_rpmsg_proc_dev * lbrp = __lbrp_from_service(service);
+
+    if (IS_ERR_OR_NULL(lbrp)) {
+        pr_err("No lbrp to work with.");
+        return NULL;
+    }
+
+    struct __lbrp_remote_ept *ept;
+    ept = kzalloc(sizeof(*ept), GFP_KERNEL);
+    if (IS_ERR_OR_NULL(ept)) {
+        dev_err(lbrp->dev, "no memory for new remote endpoint");
+        goto malloc_failed;
+    }
+
+    ept->addr = own_address;
+
+    ssize_t name_size = snprintf(NULL, 0, "ept_%d", ept->addr) + 1;
+    ept->sysfs_attr.name = kmalloc(name_size, GFP_KERNEL);
+    if (IS_ERR_OR_NULL(ept->sysfs_attr.name)) {
+        dev_err(lbrp->dev, "no memory for ept name");
+        goto file_name_malloc_failed;
+    }
+    snprintf(ept->sysfs_attr.name, name_size, "ept_%d", ept->addr);
+    ept->sysfs_attr.mode = 0660;
+
+    INIT_LIST_HEAD(&ept->list_anchor);
+    INIT_LIST_HEAD(&ept->rx_msgs_head);
+    mutex_init(&ept->rx_msgs_lock);
+
+    mutex_lock(&service->epts_lock);
+    list_add_tail(&ept->list_anchor, &service->epts_head);
+    mutex_unlock(&service->epts_lock);
+
+    int res = sysfs_create_file(service->kobj, &ept->sysfs_attr);
+    if (res != 0) {
+        dev_err(lbrp->dev, "failed to create ept attr: %s", ept->sysfs_attr.name);
+        goto sysfs_create_failed;
+    }
+
+    return ept;
+
+sysfs_create_failed:
+    mutex_lock(&service->epts_lock);
+    list_del(&ept->list_anchor);
+    mutex_unlock(&service->epts_lock);
+
+    mutex_destroy(&ept->rx_msgs_lock);
+
+    free(ept->sysfs_attr.name);
+file_name_malloc_failed:
+    free(ept);
+malloc_failed:
+    return NULL;
+}
+
+// Removes the remote endpoint from the service.
+// @service to work with
+// @own_address the endpoint-to-remove own address
+void __lbrp_remove_remote_ept(
+            struct __lbrp_remote_service *service
+            , uint32_t own_address)
+{
+    struct lb_rpmsg_proc_dev * lbrp = __lbrp_from_service(service);
+
+    dev_info(lbrp->dev, "removing ept %d of %s service"
+             , own_address, service->name);
+
+    // drop it from the service list, so no incoming messages
+    // will be appended to the ept messages
+
+    mutex_lock(&service->epts_lock);
+
+    struct __lbrp_remote_ept *ept = NULL;
+    list_for_each_entry(ept, &service->epts_head, list_anchor) {
+        if (ept->addr == own_address) {
+            break;
+        }
+    }
+    if (list_entry_is_head(ept, &service->epts_head, list_anchor)) {
+        mutex_unlock(&service->epts_lock);
+        dev_warn("ept %d of %s service already doesn't exist"
+                 , own_address, service->name);
+        return;    
+    }
+
+    list_del(&ept->list_anchor);
+
+    mutex_unlock(&service->epts_lock);
+
+    // now we will remove the corresponding sysfs file
+    sysfs_remove_file(&service->kobj, &ept->sysfs_attr);
+
+    // now we will drop all pending messages of this ept 
+
+    mutex_lock(&ept->rx_msgs_lock);
+
+    struct __lbrp_remote_ept_msg *msg;
+    while (msg = list_first_entry_or_null(&ept->rx_msgs_head)) {
+        list_del(&msg->list_anchor);
+        
+        __lbrp_remote_ept_destroy_rx_msg(msg);
+    }
+    
+    mutex_unlock(&ept->rx_msgs_lock);
+
+    // now removing the ept itself
+
+    mutex_destroy(&ept->rx_msgs_lock);
+    free(ept);
+
+    dev_info(lbrp->dev, "removed ept %d of %s service"
+             , own_address, service->name);
+}
+
+// Adds the rx message to the list of RX messages (pending to be read
+// by userland from sysfs) of the remote endpoint.
+//
+// RETURNS:
+//      NULL: didn't make it
+//      else: valid pointer to newly added msg
+struct __lbrp_remote_ept_msg __lbrp_remote_ept_push_rx_msg(
+        struct __lbrp_remote_ept *ept
+        , char *data, size_t data_len_bytes
+        , uint32_t msg_src)
+{
+    struct __lbrp_remote_ept_msg *msg = NULL;
+    msg = kzalloc(sizeof(*msg), GFP_KERNEL);
+    if (IS_ERR_OR_NULL(msg)) {
+        goto struct_alloc_f;
+    }
+
+    INIT_LIST_HEAD(&msg->list_anchor);
+    msg->src = msg_src;
+
+    msg->data = kzalloc(data_len_bytes, GFP_KERNEL);
+    if (IS_ERR_OR_NULL(msg->data)) {
+        goto data_alloc_f;
+    }
+    memcpy(msg->data, data, data_len_bytes);
+    msg->data_len_bytes = data_len_bytes;
+
+    // now adding the msg to ept (end of list for FIFO mode)
+
+    mutex_lock(&ept->rx_msgs_lock);
+    list_add_tail(&ept->rx_msgs_head);
+    mutex_unlock(&ept->rx_msgs_lock);
+
+data_alloc_f:
+    free(msg);
+struct_alloc_f:
+    return NULL;
+}
+
+// Pops the first pending message out of the RX pending queue (toward the
+// sysfs). It removes it from pending list, but doesn't destroy.
+struct __lbrp_remote_ept_msg *__lbrp_remote_ept_pop_rx_msg(
+        struct __lbrp_remote_ept *ept)
+{
+    mutex_lock(&ept->rx_msgs_lock);
+
+    struct __lbrp_remote_ept_msg *msg
+                = list_first_entry_or_null(&ept->rx_msgs_head
+                                           , struct __lbrp_remote_ept_msg
+                                           , list_anchor);
+    list_del(&msg->list_anchor);
+
+    mutex_unlock(&ept->rx_msgs_lock);
+
+    return msg;
+}
+
+// Actually destroys the remote rx message.
+// NOTE: the message must be already removed from any lists already.
+void __lbrp_remote_ept_destroy_rx_msg(
+    struct __lbrp_remote_ept_msg *msg)
+{
+    if (IS_ERR_OR_NULL(msg)) {
+        return;
+    }
+
+    msg->data_len_bytes = 0;
+    free(msg->data);
+    free(msg);
+}
+
 // Creates the remote service record for the lbrp. If service
-// already exists - all fine, no error.
+// already exists - all fine, no error. New service has no own endpoints.
 // @lbrp our device.
 // @name the remote service name to create.
 //
@@ -911,11 +1142,13 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
             struct lb_rpmsg_proc_dev *lbrp
             , char *name)
 {
+    dev_info(lbrp->dev, "Creating remote service: %s", name);
+
     mutex_lock(&lbrp->remote_services_lock);
     // check if service is there already
     struct __lbrp_remote_service *rservice = NULL;
-    list_for_each_entry_from(rservice, &lbrp->remote_services, list_anchor) {
-        if (strncmp(channel_name, rservice->name, sizeof(rservice->name)) == 0) {
+    list_for_each_entry(rservice, &lbrp->remote_services, list_anchor) {
+        if (strncmp(name, rservice->name, sizeof(rservice->name)) == 0) {
             goto done:
         }
     }
@@ -933,6 +1166,10 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
                 , sizeof(rservice.name));
         goto name_cpy_failed;
     }
+
+    mutex_init(&rservice->epts_lock);
+    INIT_LIST_HEAD(&rservice->epts_head);
+    INIT_LIST_HEAD(&rservice->list_anchor);
 
     kobject_init(&rservice->kobj, &remote_service_object_type);
 
@@ -959,7 +1196,12 @@ kobj_add_failed:
     return rservice;
 }
 
-
+// RETURNS: the lbrp device for given service
+struct lb_rpmsg_proc_dev * __lbrp_from_service(struct __lbrp_remote_service *rs)
+{
+    struct device *lbrp_dev = container_of(rs->kobj->parent, struct device, kobj);
+    return (struct lb_rpmsg_proc_dev *)dev_get_drvdata(lbrp_dev);
+}
 
 // Releases the remote service. Called by refcounter framework when refcount 
 // of the remote service reaches 0. Don't call directly.
@@ -968,9 +1210,9 @@ void __lbrp_release_remote_service_on_refcount0(struct kobject *kobject)
     struct __lbrp_remote_service *rservice
         = container_of(kobject, struct __lbrp_remote_service, kobj);
 
-    struct device *lbrp_dev = container_of(kobject->parent, struct device, kobj);
+    struct lb_rpmsg_proc_dev *lbrp = __lbrp_from_service(rservice);
 
-    dev_info(lbrp_dev, "removed remote service: %s", rservice.name);
+    dev_info(lbrp->dev, "removed remote service: %s", rservice.name);
 
     free(rservice);
 }
@@ -991,7 +1233,7 @@ void __lbrp_release_remote_service_on_refcount0(struct kobject *kobject)
 // RETURNS:
 //      0: all fine
 //      <0: negated error code
-static int lb_rpmsg_channel_ctl(
+static int lb_rpmsg_service_ctl(
             struct lb_rpmsg_proc_dev *lbrp
 	        , struct rpmsg_ns_msg *msg
             , uint32_t local_addr)
@@ -1055,7 +1297,7 @@ static void lbrp_rpmsg_release_device(struct device *dev)
 	kfree(ch_dev);
 }
 
-// Creates the rpmsg channel backed by lbrp device.
+// Creates the rpmsg service backed by lbrp device.
 // This channel has a "remote" endpoint in the local
 // sysfs file, so local applications can test all data
 // flows for rpmsg drivers.
