@@ -86,262 +86,17 @@ enum rpmsg_ns_flags {
 /* Address 53 is reserved for advertising remote services */
 #define RPMSG_NS_ADDR			(53)
 
-static void virtio_rpmsg_destroy_ept(struct rpmsg_endpoint *ept);
-static int virtio_rpmsg_send(struct rpmsg_endpoint *ept, void *data, int len);
-static int virtio_rpmsg_sendto(struct rpmsg_endpoint *ept, void *data, int len,
+static void lbrp_rpmsg_destroy_ept(struct rpmsg_endpoint *ept);
+static int lbrp_rpmsg_send(struct rpmsg_endpoint *ept, void *data, int len);
+static int lbrp_rpmsg_sendto(struct rpmsg_endpoint *ept, void *data, int len,
 			       u32 dst);
-static int virtio_rpmsg_send_offchannel(struct rpmsg_endpoint *ept, u32 src,
+static int lbrp_rpmsg_send_offchannel(struct rpmsg_endpoint *ept, u32 src,
 					u32 dst, void *data, int len);
-static int virtio_rpmsg_trysend(struct rpmsg_endpoint *ept, void *data, int len);
-static int virtio_rpmsg_trysendto(struct rpmsg_endpoint *ept, void *data,
+static int lbrp_rpmsg_trysend(struct rpmsg_endpoint *ept, void *data, int len);
+static int lbrp_rpmsg_trysendto(struct rpmsg_endpoint *ept, void *data,
 				  int len, u32 dst);
-static int virtio_rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src,
+static int lbrp_rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src,
 					   u32 dst, void *data, int len);
-
-/**
- * rpmsg_send_offchannel_raw() - send a message across to the remote processor
- * @rpdev: the rpmsg channel
- * @src: source address
- * @dst: destination address
- * @data: payload of message
- * @len: length of payload
- * @wait: indicates whether caller should block in case no TX buffers available
- *
- * This function is the base implementation for all of the rpmsg sending API.
- *
- * It will send @data of length @len to @dst, and say it's from @src. The
- * message will be sent to the remote processor which the @rpdev channel
- * belongs to.
- *
- * The message is sent using one of the TX buffers that are available for
- * communication with this remote processor.
- *
- * If @wait is true, the caller will be blocked until either a TX buffer is
- * available, or 15 seconds elapses (we don't want callers to
- * sleep indefinitely due to misbehaving remote processors), and in that
- * case -ERESTARTSYS is returned. The number '15' itself was picked
- * arbitrarily; there's little point in asking drivers to provide a timeout
- * value themselves.
- *
- * Otherwise, if @wait is false, and there are no TX buffers available,
- * the function will immediately fail, and -ENOMEM will be returned.
- *
- * Normally drivers shouldn't use this function directly; instead, drivers
- * should use the appropriate rpmsg_{try}send{to, _offchannel} API
- * (see include/linux/rpmsg.h).
- *
- * Returns 0 on success and an appropriate error value on failure.
- */
-static int rpmsg_send_offchannel_raw(struct rpmsg_device *rpdev,
-				     u32 src, u32 dst,
-				     void *data, int len, bool wait)
-{
-	struct lbrp_rpmsg_channel_dev *vch = to_lbrp_rpmsg_channel_dev(rpdev);
-	struct virtproc_info *vrp = vch->vrp;
-	struct device *dev = &rpdev->dev;
-	struct scatterlist sg;
-	struct rpmsg_hdr *msg;
-	int err;
-
-	/* bcasting isn't allowed */
-	if (src == RPMSG_ADDR_ANY || dst == RPMSG_ADDR_ANY) {
-		dev_err(dev, "invalid addr (src 0x%x, dst 0x%x)\n", src, dst);
-		return -EINVAL;
-	}
-
-	/*
-	 * We currently use fixed-sized buffers, and therefore the payload
-	 * length is limited.
-	 *
-	 * One of the possible improvements here is either to support
-	 * user-provided buffers (and then we can also support zero-copy
-	 * messaging), or to improve the buffer allocator, to support
-	 * variable-length buffer sizes.
-	 */
-	if (len > vrp->buf_size - sizeof(struct rpmsg_hdr)) {
-		dev_err(dev, "message is too big (%d)\n", len);
-		return -EMSGSIZE;
-	}
-
-	/* grab a buffer */
-	msg = get_a_tx_buf(vrp);
-	if (!msg && !wait)
-		return -ENOMEM;
-
-	/* no free buffer ? wait for one (but bail after 15 seconds) */
-	while (!msg) {
-		/* enable "tx-complete" interrupts, if not already enabled */
-		rpmsg_upref_sleepers(vrp);
-
-		/*
-		 * sleep until a free buffer is available or 15 secs elapse.
-		 * the timeout period is not configurable because there's
-		 * little point in asking drivers to specify that.
-		 * if later this happens to be required, it'd be easy to add.
-		 */
-		err = wait_event_interruptible_timeout(vrp->sendq,
-					(msg = get_a_tx_buf(vrp)),
-					msecs_to_jiffies(15000));
-
-		/* disable "tx-complete" interrupts if we're the last sleeper */
-		rpmsg_downref_sleepers(vrp);
-
-		/* timeout ? */
-		if (!err) {
-			dev_err(dev, "timeout waiting for a tx buffer\n");
-			return -ERESTARTSYS;
-		}
-	}
-
-	msg->len = len;
-	msg->flags = 0;
-	msg->src = src;
-	msg->dst = dst;
-	msg->reserved = 0;
-	memcpy(msg->data, data, len);
-
-	dev_dbg(dev, "TX From 0x%x, To 0x%x, Len %d, Flags %d, Reserved %d\n",
-		msg->src, msg->dst, msg->len, msg->flags, msg->reserved);
-#if defined(CONFIG_DYNAMIC_DEBUG)
-	dynamic_hex_dump("rpmsg_virtio TX: ", DUMP_PREFIX_NONE, 16, 1,
-			 msg, sizeof(*msg) + msg->len, true);
-#endif
-
-	rpmsg_sg_init(&sg, msg, sizeof(*msg) + len);
-
-	mutex_lock(&vrp->tx_lock);
-
-	/* add message to the remote processor's virtqueue */
-	err = virtqueue_add_outbuf(vrp->svq, &sg, 1, msg, GFP_KERNEL);
-	if (err) {
-		/*
-		 * need to reclaim the buffer here, otherwise it's lost
-		 * (memory won't leak, but rpmsg won't use it again for TX).
-		 * this will wait for a buffer management overhaul.
-		 */
-		dev_err(dev, "virtqueue_add_outbuf failed: %d\n", err);
-		goto out;
-	}
-
-	/* tell the remote processor it has a pending message to read */
-	virtqueue_kick(vrp->svq);
-out:
-	mutex_unlock(&vrp->tx_lock);
-	return err;
-}
-
-static int virtio_rpmsg_send(struct rpmsg_endpoint *ept, void *data, int len)
-{
-	struct rpmsg_device *rpdev = ept->rpdev;
-	u32 src = ept->addr, dst = rpdev->dst;
-
-	return rpmsg_send_offchannel_raw(rpdev, src, dst, data, len, true);
-}
-
-static int virtio_rpmsg_sendto(struct rpmsg_endpoint *ept, void *data, int len,
-			       u32 dst)
-{
-	struct rpmsg_device *rpdev = ept->rpdev;
-	u32 src = ept->addr;
-
-	return rpmsg_send_offchannel_raw(rpdev, src, dst, data, len, true);
-}
-
-static int virtio_rpmsg_send_offchannel(struct rpmsg_endpoint *ept, u32 src,
-					u32 dst, void *data, int len)
-{
-	struct rpmsg_device *rpdev = ept->rpdev;
-
-	return rpmsg_send_offchannel_raw(rpdev, src, dst, data, len, true);
-}
-
-static int virtio_rpmsg_trysend(struct rpmsg_endpoint *ept, void *data, int len)
-{
-	struct rpmsg_device *rpdev = ept->rpdev;
-	u32 src = ept->addr, dst = rpdev->dst;
-
-	return rpmsg_send_offchannel_raw(rpdev, src, dst, data, len, false);
-}
-
-static int virtio_rpmsg_trysendto(struct rpmsg_endpoint *ept, void *data,
-				  int len, u32 dst)
-{
-	struct rpmsg_device *rpdev = ept->rpdev;
-	u32 src = ept->addr;
-
-	return rpmsg_send_offchannel_raw(rpdev, src, dst, data, len, false);
-}
-
-static int virtio_rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src,
-					   u32 dst, void *data, int len)
-{
-	struct rpmsg_device *rpdev = ept->rpdev;
-
-	return rpmsg_send_offchannel_raw(rpdev, src, dst, data, len, false);
-}
-
-static int rpmsg_recv_single(struct virtproc_info *vrp, struct device *dev,
-			     struct rpmsg_hdr *msg, unsigned int len)
-{
-	struct rpmsg_endpoint *ept;
-	struct scatterlist sg;
-	int err;
-
-	dev_dbg(dev, "From: 0x%x, To: 0x%x, Len: %d, Flags: %d, Reserved: %d\n",
-		msg->src, msg->dst, msg->len, msg->flags, msg->reserved);
-#if defined(CONFIG_DYNAMIC_DEBUG)
-	dynamic_hex_dump("rpmsg_virtio RX: ", DUMP_PREFIX_NONE, 16, 1,
-			 msg, sizeof(*msg) + msg->len, true);
-#endif
-
-	/*
-	 * We currently use fixed-sized buffers, so trivially sanitize
-	 * the reported payload length.
-	 */
-	if (len > vrp->buf_size ||
-	    msg->len > (len - sizeof(struct rpmsg_hdr))) {
-		dev_warn(dev, "inbound msg too big: (%d, %d)\n", len, msg->len);
-		return -EINVAL;
-	}
-
-	/* use the dst addr to fetch the callback of the appropriate user */
-	mutex_lock(&vrp->endpoints_lock);
-
-	ept = idr_find(&vrp->endpoints, msg->dst);
-
-	/* let's make sure no one deallocates ept while we use it */
-	if (ept)
-		kref_get(&ept->refcount);
-
-	mutex_unlock(&vrp->endpoints_lock);
-
-	if (ept) {
-		/* make sure ept->cb doesn't go away while we use it */
-		mutex_lock(&ept->cb_lock);
-
-		if (ept->cb)
-			ept->cb(ept->rpdev, msg->data, msg->len, ept->priv,
-				msg->src);
-
-		mutex_unlock(&ept->cb_lock);
-
-		/* farewell, ept, we don't need you anymore */
-		kref_put(&ept->refcount, __ept_on_refcount0);
-	} else
-		dev_warn(dev, "msg received with no recipient\n");
-
-	/* publish the real size of the buffer */
-	rpmsg_sg_init(&sg, msg, vrp->buf_size);
-
-	/* add the buffer back to the remote processor's virtqueue */
-	err = virtqueue_add_inbuf(vrp->rvq, &sg, 1, msg, GFP_KERNEL);
-	if (err < 0) {
-		dev_err(dev, "failed to add a virtqueue buffer: %d\n", err);
-		return err;
-	}
-
-	return 0;
-}
 
 
 
@@ -471,44 +226,6 @@ free_vrp:
 	kfree(vrp);
 	return err;
 }
-
-/**
- * struct virtproc_info - virtual remote processor state
- * @vdev:	the virtio device
- * @rvq:	rx virtqueue
- * @svq:	tx virtqueue
- * @rbufs:	kernel address of rx buffers
- * @sbufs:	kernel address of tx buffers
- * @num_bufs:	total number of buffers for rx and tx
- * @buf_size:   size of one rx or tx buffer
- * @last_sbuf:	index of last tx buffer used
- * @bufs_dma:	dma base addr of the buffers
- * @tx_lock:	protects svq, sbufs and sleepers, to allow concurrent senders.
- *		sending a message might require waking up a dozing remote
- *		processor, which involves sleeping, hence the mutex.
- * @sendq:	wait queue of sending contexts waiting for a tx buffers
- * @sleepers:	number of senders that are waiting for a tx buffer
- * @ns_ept:	the bus's name service endpoint
- *
- * This structure stores the rpmsg state of a given virtio remote processor
- * device (there might be several virtio proc devices for each physical
- * remote processor).
- */
-struct virtproc_info {
-	struct virtio_device *vdev;
-	struct virtqueue *rvq, *svq;
-	void *rbufs, *sbufs;
-	unsigned int num_bufs;
-	unsigned int buf_size;
-	int last_sbuf;
-	dma_addr_t bufs_dma;
-	struct mutex tx_lock;
-	wait_queue_head_t sendq;
-	atomic_t sleepers;
-	struct rpmsg_endpoint *ns_ept;
-};
-
-
 
 ////////////////////--------------------////////////////////    VERIFIED BEGIN
 
@@ -696,11 +413,16 @@ struct lbrp_rpmsg_channel_dev {
 //             NOTE: all channels are the struct lbrp_rpmsg_channel_dev which
 //                  is "inherited" from rpmsg_device.
 
+// service endpoints (attr) operations
+const struct sysfs_ops __lbrp_service_sysfs_ops = {
+	.show = __lbrp_service_ept_attr_show
+	, .store = __lbrp_service_ept_attr_store
+};
 
 // defines the remote service object type
 static const struct kobj_type remote_service_object_type {
-        .release = __lbrp_remove_remote_service
-        , .sysfs_ops = &kobj_sysfs_ops,
+        .release = &__lbrp_remove_remote_service_refcnt0
+        , .sysfs_ops = &__lbrp_service_sysfs_ops,
 };
 
 static const struct rpmsg_device_ops lbrp_rpmsg_ops = {
@@ -711,16 +433,14 @@ static const struct rpmsg_device_ops lbrp_rpmsg_ops = {
 
 static const struct rpmsg_endpoint_ops lbrp_endpoint_ops = {
 	.destroy_ept = virtio_rpmsg_destroy_ept,
-////////////////////--------------------////////////////////    VERIFIED END
-	.send = virtio_rpmsg_send,
-	.sendto = virtio_rpmsg_sendto,
-	.send_offchannel = virtio_rpmsg_send_offchannel,
-	.trysend = virtio_rpmsg_trysend,
-	.trysendto = virtio_rpmsg_trysendto,
-	.trysend_offchannel = virtio_rpmsg_trysend_offchannel,
+	.send = lbrp_rpmsg_send,
+	.sendto = lbrp_rpmsg_sendto,
+	.send_offchannel = lbrp_rpmsg_send_offchannel,
+	.trysend = lbrp_rpmsg_trysend,
+	.trysendto = lbrp_rpmsg_trysendto,
+	.trysend_offchannel = lbrp_rpmsg_trysend_offchannel,
 };
 
-////////////////////--------------------////////////////////    VERIFIED BEGIN
 // Rpmsg on refcount->0 destructor.
 // @kref: the ept's reference count
 // Called automatically when refcount of ept reaches 0.
@@ -752,6 +472,7 @@ static struct rpmsg_endpoint *lbrp_rpmsg_create_ept(
 }
 
 // Implements the contract of the rpmsg_create_ept() (see rpmsg documentation).
+//
 // @lbrp our main device
 // @rpdev the pointer to the channel device
 // RETURNS:
@@ -839,7 +560,7 @@ static void virtio_rpmsg_destroy_ept(struct rpmsg_endpoint *ept)
 	__rpmsg_remove_ept(lbrp_ch->lbrp_dev, ept);
 }
 
-// The sysfs create_ept_store function get's triggered whenever from
+// Get's triggered whenever from
 // userspace one wants to write the sysfs file create_ept file. It creates
 // a new remote endpoint for the rpmsg.
 //
@@ -872,6 +593,12 @@ static ssize_t create_ept_store(
         goto wrong_usage;
     }
 
+    if (strlen(service_name) >= RPMSG_NAME_SIZE) {
+        dev_err(dev, "Too long service name: must be <= %d"
+                , RPMSG_NAME_SIZE - 1)
+        goto wrong_usage;
+    }
+
     uint32_t remote_addr;
     if (kstrtou32(addr_str, 0, &remote_addr)) {
         goto wrong_usage;
@@ -898,36 +625,334 @@ static ssize_t create_ept_store(
                 rservice, remote_addr);
 
     if (IS_ERR_OR_NULL(ept)) {
-        kobject_put(&rservice->kobj);
+        __lbrp_put_remote_service(rservice);
         goto error;
     }
-    kobject_put(&rservice->kobj);
+
+    // endpoint holds a ref to the service, from now on
+    __lbrp_put_remote_service(rservice);
+
+
 
     // if the channel was just created, then we notify the "other" side
     // about its creation
     if (!channel_existed) {
-        struct rpmsg_channel_info chinfo;
-        strncpy(chinfo.name, service_name, sizeof(chinfo.name));
-        chinfo.src = RPMSG_ADDR_ANY;
-        chinfo.dst = remote_addr;
+        struct rpmsg_ns_msg msg;
+        strncpy(msg.name, service_name, sizeof(msg.name));
+        msg.addr = remote_addr;
+        msg.flags = RPMSG_NS_CREATE;
 
-        lbrp_create_channel(lbrp, &chinfo);
+        lb_rpmsg_service_ctl(lbrp, &msg);
     }
 
 	return count;
 
 wrong_usage:
 	dev_err(dev,
-            "WRITE FORMAT:  \"your-service-name ADDR\""
-            " * your-service-name - a string with no spaces"
-            " * single space"
-            " * ADDR - the int32_t the address of the remote endpoint");
+            "Adds the given endpoint to the service in sysfs.\n"
+            "WRITE FORMAT:  \"your-service-name ADDR\"\n"
+            " * your-service-name - a string with no spaces (max len: %d)\n"
+            " * single space\n"
+            " * ADDR - the int32_t the address of the remote endpoint\n"
+            , RPMSG_NAME_SIZE - 1);
     return -EINVAL;
 
 error:
 	return -EFAULT;
 }
 static DEVICE_ATTR_WO(create_ept);
+
+// Get's triggered whenever from userspace one wants to write the sysfs
+// file remove_ept file. It removes given endpoint from given service.
+//
+// NOTE: if the remote service or endpoint doesn't exist, no error.
+//
+// NOTE: if this is a last endpoint of the service it will be removed
+//      automatically.
+//
+// WRITE FORMAT:  "your-service-name ADDR"
+//
+//  * your-service-name - a string with no spaces
+//  * single space
+//  * ADDR - the int32_t the address of the remote endpoint
+// 
+// @dev {valid ptr} device, which has the driver data->lb_rpmsg_proc_dev
+// @attr {valid ptr} device attribute properties
+// @buf {valid ptr} buffer to read input from userspace
+// @count {number} the @buf string length not-including the  0-terminator
+//                 which is automatically appended by sysfs subsystem
+//
+// RETURNS:
+//         count: ok
+//         <0: negated error code
+static ssize_t remove_ept_store(
+		struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+    char *service_name = strim(strsep(buf, " "));
+    char *addr_str = strim(buf);
+
+    if (IS_ERR_OR_NULL(addr_str) || IS_ERR_OR_NULL(service_name)) {
+        goto wrong_usage;
+    }
+
+    if (strlen(service_name) >= RPMSG_NAME_SIZE) {
+        dev_err(dev, "Too long service name: must be <= %d"
+                , RPMSG_NAME_SIZE - 1)
+        goto wrong_usage;
+    }
+
+    uint32_t remote_addr;
+    if (kstrtou32(addr_str, 0, &remote_addr)) {
+        goto wrong_usage;
+    }
+
+    struct lb_rpmsg_proc_dev *lbrp
+	        = (struct b_rpmsg_proc_dev *)dev_get_drvdata(dev);
+    if (IS_ERR_OR_NULL(lbrp)) {
+        dev_err(dev, "Sorry, no lbrp dev referenced by the dev.");
+        goto error;
+    }
+
+    // NOTE: increments service refcount
+    struct __lbrp_remote_service *service
+                    = __lbrp_get_remote_service(lbrp, service_name);
+
+    if (!service) {
+        dev_info(dev, "Service %s already doesn't exist.", name);
+        return count;
+    }
+
+    __lbrp_remove_remote_ept(service, remote_addr, true);
+
+    __lbrp_put_remote_service(rservice);
+	return count;
+
+wrong_usage:
+	dev_err(dev,
+            "Removes the given endpoint from sysfs.\n"
+            "WRITE FORMAT:  \"your-service-name ADDR\"\n"
+            " * your-service-name - a string with no spaces (max len: %d)\n"
+            " * single space\n"
+            " * ADDR - the int32_t the address of the remote endpoint\n"
+            , RPMSG_NAME_SIZE - 1);
+    return -EINVAL;
+
+error:
+	return -EFAULT;
+}
+static DEVICE_ATTR_WO(remove_ept);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Endpoint file read operation.
+//
+//     * to read one incoming message out of queue
+//       just read() on this ept, you will get
+//       the: 4 bytes of src addr +  raw payload
+static ssize_t __lbrp_service_ept_attr_show(
+				struct kobject *kobj, struct attribute *attr, char *buf)
+{
+	struct __lbrp_remote_ept *ept
+				= container_of(attr, struct __lbrp_remote_ept, sysfs_attr);
+
+	struct __lbrp_remote_ept_msg *msg = __lbrp_remote_ept_pop_rx_msg(ept);
+
+	if (!msg) {
+		return 0;
+	}
+
+	ssize_t len = 0;
+
+	// 4 bytes of the size
+	*((uint32_t *)buf) = (uint32_t)len;
+	len += 4;
+
+	// the data itself
+	memcpy(buf + sizeof(uint32_t), msg->data, len);
+	len += msg->data_len_bytes;
+
+	__lbrp_remote_ept_destroy_rx_msg(msg);
+
+	return len;
+}
+
+// Endpoint file write operation.
+//
+//     * to write the message use write() with following
+//       format: 4 bytes of dst addr + raw payload.
+static ssize_t __lbrp_service_ept_attr_store(
+				struct kobject *kobj, struct attribute *attr
+			    , const char *buf, size_t count)
+{
+	struct __lbrp_remote_ept *ept
+				= container_of(attr, struct __lbrp_remote_ept, sysfs_attr);
+
+	if (count <= sizeof(uint32_t)) {
+		return -EINVAL;
+	}
+
+	uint32_t msg_len = count - sizeof(uint32_t);
+	char *msg_data = buf + sizeof(uint32_t);
+
+	// first 4 bytes of destination
+	uint32_t dst = *((uint32_t *)buf);
+
+
+
+
+
+
+
+
+
+
+	dev_dbg(dev, "From: 0x%x, To: 0x%x, Len: %d, Flags: %d, Reserved: %d\n",
+		msg->src, msg->dst, msg->len, msg->flags, msg->reserved);
+#if defined(CONFIG_DYNAMIC_DEBUG)
+	dynamic_hex_dump("rpmsg_virtio RX: ", DUMP_PREFIX_NONE, 16, 1,
+			 msg, sizeof(*msg) + msg->len, true);
+#endif
+
+
+	// to match the virtio logic
+	if (len > vrp->buf_size ||
+	    msg->len > (len - sizeof(struct rpmsg_hdr))) {
+		dev_warn(dev, "inbound msg too big: (%d, %d)\n", len, msg->len);
+		return -EINVAL;
+	}
+
+
+	/* use the dst addr to fetch the callback of the appropriate user */
+	mutex_lock(&vrp->endpoints_lock);
+
+	ept = idr_find(&vrp->endpoints, msg->dst);
+
+	/* let's make sure no one deallocates ept while we use it */
+	if (ept)
+		kref_get(&ept->refcount);
+
+	mutex_unlock(&vrp->endpoints_lock);
+
+
+
+	if (ept) {
+		/* make sure ept->cb doesn't go away while we use it */
+		mutex_lock(&ept->cb_lock);
+
+		if (ept->cb)
+			ept->cb(ept->rpdev, msg->data, msg->len, ept->priv,
+				msg->src);
+
+		mutex_unlock(&ept->cb_lock);
+
+		/* farewell, ept, we don't need you anymore */
+		kref_put(&ept->refcount, __ept_on_refcount0);
+	} else
+		dev_warn(dev, "msg received with no recipient\n");
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	return count;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Creates/gets an endpoint with given own address for the given service.
 // NOTE: if endpoint already exists is is not an error.
@@ -998,7 +1023,7 @@ struct __lbrp_remote_ept *__lbrp_create_remote_ept(
 
     // don't allow anyone to delete the service while it has
     // endpoints
-    kobject_get(&service->kobj);
+    __lbrp_get_remote_service_by_ptr(service);
 
     return ept;
 
@@ -1086,16 +1111,21 @@ void __lbrp_remove_remote_ept(
              , own_address, service->name);
 
     // if this was the last endpoint of the service, the service also leaves.
-    kobject_put(&service->kobj);
+    __lbrp_put_remote_service(service);
 }
 
 // Adds the rx message to the list of RX messages (pending to be read
 // by userland from sysfs) of the remote endpoint.
+// @ept the remote endpoint to work with.
+// @data raw data to push as message
+//      NOTE: this data is copied
+// @data_len_bytes size of @data in bytes.
+// @msg_src the source addr of the message.
 //
 // RETURNS:
 //      NULL: didn't make it
 //      else: valid pointer to newly added msg
-struct __lbrp_remote_ept_msg __lbrp_remote_ept_push_rx_msg(
+struct __lbrp_remote_ept_msg *__lbrp_remote_ept_push_rx_msg(
         struct __lbrp_remote_ept *ept
         , char *data, size_t data_len_bytes
         , uint32_t msg_src)
@@ -1122,15 +1152,164 @@ struct __lbrp_remote_ept_msg __lbrp_remote_ept_push_rx_msg(
     list_add_tail(&ept->rx_msgs_head);
     mutex_unlock(&ept->rx_msgs_lock);
 
+    return msg;
+
 data_alloc_f:
     free(msg);
 struct_alloc_f:
     return NULL;
 }
 
+// Send a message across to the "remote" processor.
+// @rpdev: the rpmsg channel
+// @src: source address
+// @dst: destination address
+// @data: payload of message
+// @len: length of payload
+// @wait: indicates whether caller should block if operation needs to wait.
+//
+// This function is the base implementation for all of the rpmsg sending API.
+//
+// It will send @data of length @len to @dst, and say it's from @src. The
+// message will be sent to the "remote" processor which the @rpdev channel
+// belongs to.
+//
+// The message is sent using one of the TX buffers that are available for
+// communication with this remote processor.
+//
+// RETURNS:
+//      0: on success,
+//      <0: negated error value on failure.
+static int lbrp_send_offchannel_raw(struct rpmsg_device *rpdev,
+				     u32 src, u32 dst,
+				     void *data, int len, bool wait)
+{
+	struct lbrp_rpmsg_channel_dev *lbrp= to_lbrp_rpmsg_channel_dev(rpdev);
+	struct device *dev = lbrp->dev;
+
+	// we can do broadcasting actually, but as long as native rpmsg
+    // over virtio doesn't suppor this, we also will not support for now
+	if (src == RPMSG_ADDR_ANY || dst == RPMSG_ADDR_ANY) {
+		dev_err(dev, "invalid addr (src 0x%x, dst 0x%x): no broadcasting"
+                " allowed\n", src, dst);
+		return -EINVAL;
+	}
+
+    // same reason for the msg size limit: rpmsg over virtio supports
+    // only up to MAX_RPMSG_BUF_SIZE now is 512 bytes messages.
+	if (len > MAX_RPMSG_BUF_SIZE - sizeof(struct rpmsg_hdr)) {
+		dev_err(dev, "message is too big (%d), must be <= %d\n", len
+                , MAX_RPMSG_BUF_SIZE - sizeof(struct rpmsg_hdr));
+		return -EMSGSIZE;
+	}
+
+    // find the service and endpoint for the dst
+
+    struct __lbrp_remote_service *rservice;
+    struct __lbrp_remote_ept *rept;
+
+	mutex_lock(&lbrp->remote_services_lock);
+
+    list_for_each_entry(rservice, &lbrp->remote_services, list_anchor) {
+	    mutex_lock(&rservice->epts_lock);
+        list_for_each_entry(rept, &rservice->epts_head, list_anchor) {
+            if (rept->addr == dst) {
+                // prevent service from going away
+                __lbrp_get_remote_service_by_ptr(rservice);
+	            mutex_unlock(&lbrp->remote_services_lock);
+                goto found;
+            }
+        }
+	    mutex_unlock(&rservice->epts_lock);
+    }
+
+    // remote endpoint was not found
+	mutex_unlock(&lbrp->remote_services_lock);
+    // this is not an error, actually
+    return 0;
+
+found:
+    // NOTE: we keep the endpoints lock here
+    //      so, no one will try to remove it meanwhile
+
+    int res = 0;
+    if (__lbrp_remote_ept_push_rx_msg(rept, data, len, src) == NULL) {
+        dev_err(lbrp->dev, "Failed to push the message to remote endpoint:"
+                " TX From 0x%x, To 0x%x, Len %d"
+                , msg->src, msg->dst, msg->len);
+        res = -1;
+    };
+
+	mutex_unlock(&rservice->epts_lock);
+
+    if (res == 0) {
+        dev_dbg(dev, "TX From 0x%x, To 0x%x, Len %d, Flags %d, Reserved %d\n",
+            msg->src, msg->dst, msg->len, msg->flags, msg->reserved);
+#if defined(CONFIG_DYNAMIC_DEBUG)
+        dynamic_hex_dump("lbrp_rpmsg TX: ", DUMP_PREFIX_NONE, 16, 1,
+                 msg, sizeof(*msg) + msg->len, true);
+#endif
+    }
+
+    __lbrp_put_remote_service(rservice);
+
+	return res;
+}
+
+static int lbrp_rpmsg_send(struct rpmsg_endpoint *ept, void *data, int len)
+{
+	struct rpmsg_device *rpdev = ept->rpdev;
+	u32 src = ept->addr, dst = rpdev->dst;
+
+	return lbrp_send_offchannel_raw(rpdev, src, dst, data, len, true);
+}
+
+static int lbrp_rpmsg_sendto(struct rpmsg_endpoint *ept, void *data, int len,
+			       u32 dst)
+{
+	struct rpmsg_device *rpdev = ept->rpdev;
+	u32 src = ept->addr;
+
+	return lbrp_send_offchannel_raw(rpdev, src, dst, data, len, true);
+}
+
+static int lbrp_rpmsg_send_offchannel(struct rpmsg_endpoint *ept, u32 src,
+					u32 dst, void *data, int len)
+{
+	struct rpmsg_device *rpdev = ept->rpdev;
+
+	return lbrp_send_offchannel_raw(rpdev, src, dst, data, len, true);
+}
+
+static int lbrp_rpmsg_trysend(struct rpmsg_endpoint *ept, void *data, int len)
+{
+	struct rpmsg_device *rpdev = ept->rpdev;
+	u32 src = ept->addr, dst = rpdev->dst;
+
+	return lbrp_send_offchannel_raw(rpdev, src, dst, data, len, false);
+}
+
+static int lbrp_rpmsg_trysendto(struct rpmsg_endpoint *ept, void *data,
+				  int len, u32 dst)
+{
+	struct rpmsg_device *rpdev = ept->rpdev;
+	u32 src = ept->addr;
+
+	return lbrp_send_offchannel_raw(rpdev, src, dst, data, len, false);
+}
+
+static int lbrp_rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src,
+					   u32 dst, void *data, int len)
+{
+	struct rpmsg_device *rpdev = ept->rpdev;
+
+	return lbrp_send_offchannel_raw(rpdev, src, dst, data, len, false);
+}
+
 // Pops the first pending message out of the RX pending queue (toward the
 // sysfs). It removes it from pending list, but doesn't destroy.
-// @ept endpoint to work with
+// You need to call __lbrp_remote_ept_destroy_rx_msg(...) to destroy it later.
+// @ept endpoint to work with.
 //
 // RETURNS: the first message in rx queue, or NULL
 struct __lbrp_remote_ept_msg *__lbrp_remote_ept_pop_rx_msg(
@@ -1154,8 +1333,7 @@ struct __lbrp_remote_ept_msg *__lbrp_remote_ept_pop_rx_msg(
 // Actually destroys the remote rx message.
 // NOTE: the message must be already removed from any lists already.
 // @msg the message to delete.
-void __lbrp_remote_ept_destroy_rx_msg(
-    struct __lbrp_remote_ept_msg *msg)
+void __lbrp_remote_ept_destroy_rx_msg(struct __lbrp_remote_ept_msg *msg)
 {
     if (IS_ERR_OR_NULL(msg)) {
         return;
@@ -1166,13 +1344,52 @@ void __lbrp_remote_ept_destroy_rx_msg(
     free(msg);
 }
 
+// Tries to find remote service.
+// NOTE: increments the service refcount
+//
+// RETURNS:
+//      !NULL: the remote service pointer
+//      NULL: if service was not found
+struct __lbrp_remote_service *__lbrp_get_remote_service(
+            struct lb_rpmsg_proc_dev *lbrp
+            , char *name)
+{
+    mutex_lock(&lbrp->remote_services_lock);
+    struct __lbrp_remote_service *rservice = NULL;
+    list_for_each_entry(rservice, &lbrp->remote_services, list_anchor) {
+        if (strncmp(name, rservice->name, sizeof(rservice->name)) == 0) {
+            break;
+        }
+    }
+    if (rservice) {
+        __lbrp_get_remote_service_by_ptr(service);
+    }
+    mutex_unlock(&lbrp->remote_services_lock);
+    return rservice;
+}
+
+// Decrement refcounter of the service.
+void __lbrp_put_remote_service(
+            struct __lbrp_remote_service *service)
+{
+    kobject_put(&rservice->kobj);
+}
+
+// increment the service refcount
+void __lbrp_get_remote_service_by_ptr(
+            struct __lbrp_remote_service *service)
+{
+    kobject_get(&service->kobj);
+}
+
 // Creates the remote service record for the lbrp. If service
 // already exists - all fine, no error. New service has no own endpoints.
 // @lbrp our device.
 // @name the remote service name to create.
 // @existed__out set to true if channel existed.
 //
-// NOTE: after this call the refcount of the service is 1
+// NOTE: after this call the refcount of the service is incremented
+//    (to 1 for new services, and x++ for existing) (if it succeeded).
 //
 // LOCKING: does all locking itself.
 //
@@ -1186,38 +1403,37 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
 {
     dev_info(lbrp->dev, "Creating remote service: %s", name);
 
-    mutex_lock(&lbrp->remote_services_lock);
     // check if service is there already
-    struct __lbrp_remote_service *rservice = NULL;
-    list_for_each_entry(rservice, &lbrp->remote_services, list_anchor) {
-        if (strncmp(name, rservice->name, sizeof(rservice->name)) == 0) {
-            if (!IS_ERR_OR_NULL(existed_out)) {
-                *existed__out = true;
-            }
-            goto done:
+    struct __lbrp_remote_service *rservice
+                = __lbrp_get_remote_service(lbrp, name);
+    if (rservice) {
+        if (existed__out) {
+            *existed__out = true;
         }
-    }
-    if (!IS_ERR_OR_NULL(existed_out)) {
-        *existed__out = false;
+
+        return rservice;
     }
 
     // need to create a new one
     rservice = kzalloc(sizeof(*rservice), GFP_KERNEL);
     if (IS_ERR_OR_NULL(rservice)) {
         dev_err(lbrp->dev, "no memory for new remote service");
-        goto malloc_failed;
+        return NULL;
     }
 
     strncpy(&rservice.name[0], name, sizeof(rservice.name));
     if (rservice.name[sizeof(rservice.name) - 1] != 0) {
         dev_err(lbrp->dev, "name is too big, must fit into %d chars"
                 , sizeof(rservice.name));
-        goto name_cpy_failed;
+        free(rservice);
+        return NULL;
     }
 
     mutex_init(&rservice->epts_lock);
     INIT_LIST_HEAD(&rservice->epts_head);
     INIT_LIST_HEAD(&rservice->list_anchor);
+
+    mutex_lock(&lbrp->remote_services_lock);
 
     kobject_init(&rservice->kobj, &remote_service_object_type);
 
@@ -1226,21 +1442,12 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
     int res = kobject_add(&rservice->kobj, &lbrp->dev->kobj, "%s", name);
     if (res != 0) {
         dev_err(lbrp->dev, "failed to add remote service, err: %d", res);
-        list_del(&rservice->list_anchor);
-        kobject_put(&rservice->kobj);
+        __lbrp_put_remote_service(rservice);
         rservice = NULL;
-        goto kobj_add_failed;
     }
 
-done:
     mutex_unlock(&lbrp->remote_services_lock);
-    return rservice;
 
-name_cpy_failed:
-    free(rservice);
-malloc_failed:
-kobj_add_failed:
-    mutex_unlock(&lbrp->remote_services_lock);
     return rservice;
 }
 
@@ -1249,7 +1456,7 @@ kobj_add_failed:
 //
 // @kobject the pointer to the kobj of the service.
 // @name name of the service to remove
-void __lbrp_remove_remote_service(struct kobject *kobject)
+void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
 {
     struct __lbrp_remote_service *service
         = container_of(kobject, struct __lbrp_remote_service, kobj);
@@ -1262,7 +1469,7 @@ void __lbrp_remove_remote_service(struct kobject *kobject)
     }
     dev_info(lbrp->dev, "Removing remote service: %s", name);
 
-    // First, dropping service from the lbrp services list
+    // Then dropping service from the lbrp services list
 
     mutex_lock(&lbrp->remote_services_lock);
 
@@ -1281,6 +1488,17 @@ void __lbrp_remove_remote_service(struct kobject *kobject)
     list_del(&service->list_anchor);
 
     mutex_unlock(&lbrp->remote_services_lock);
+
+    // Notifying the "other" side about service removal
+
+    {
+        struct rpmsg_ns_msg msg;
+        strncpy(msg.name, service->name, sizeof(msg.name));
+        msg.addr = RPMSG_ADDR_ANY;
+        msg.flags = RPMSG_NS_DESTROY;
+
+        lb_rpmsg_service_ctl(lbrp, &msg);
+    }
 
     // Ok, now dropping all endpoints of the service
 
@@ -1314,6 +1532,9 @@ struct lb_rpmsg_proc_dev * __lbrp_from_service(struct __lbrp_remote_service *rs)
 // NOTE: in general case the remote counterpart will get the address
 //      of local enpoint when we send the data to it for the first time (it
 //      will be stated as src address of the msg).
+// NOTE: this guy is called when the new service announcement arrives
+//      from "remote" (in our case when a new service is created in
+//      sysfs by user app).
 //
 // @lbrp our device to work with
 // @msg service (channel) announcement info
@@ -1323,13 +1544,12 @@ struct lb_rpmsg_proc_dev * __lbrp_from_service(struct __lbrp_remote_service *rs)
 //      <0: negated error code
 static int lb_rpmsg_service_ctl(
             struct lb_rpmsg_proc_dev *lbrp
-	        , struct rpmsg_ns_msg *msg
-            , uint32_t local_addr)
+	        , struct rpmsg_ns_msg *msg)
 {
 	struct device *dev = lbrp->dev;
 
 	dev_info(dev, "%sing lbrp channel \"%s\", addr: 0x%x\n",
-		 msg->flags & RPMSG_NS_DESTROY ? "Destroy" : "Creat",
+		 msg->flags & RPMSG_NS_DESTROY ? "Destroy" : "Create",
 		 msg->name, msg->addr);
 
 	struct rpmsg_channel_info chinfo;
@@ -1385,10 +1605,7 @@ static void lbrp_rpmsg_release_device(struct device *dev)
 	kfree(ch_dev);
 }
 
-// Creates the rpmsg service backed by lbrp device.
-// This channel has a "remote" endpoint in the local
-// sysfs file, so local applications can test all data
-// flows for rpmsg drivers.
+// Creates the rpmsg service (local one) backed by lbrp device.
 //
 // NOTE: it eventually calls the rpmsg_register_device(...)
 //      which leads to probing the target rpmsg service driver.
@@ -1446,7 +1663,8 @@ static struct rpmsg_device *lbrp_create_channel(
 static ssize_t announcements_show(
 		struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct lb_rpmsg_proc_dev *lbrp = (struct lb_rpmsg_proc_dev *)dev_get_drvdata(dev);
+	struct lb_rpmsg_proc_dev *lbrp
+                = (struct lb_rpmsg_proc_dev *)dev_get_drvdata(dev);
     ssize_t length = 0;
 
     mutex_lock(&lbrp->rpmsg_announcements_lock);
@@ -1509,15 +1727,15 @@ static int lbrp_rpmsg_announce(struct rpmsg_device *rpdev, uint32_t flags)
 }
 
 // Tells the other side that we just created a new channel and it is
-// avileable for communication.
+// avileable for communication. Called automatically by the rpmsg core.
 static int lbrp_rpmsg_announce_create(struct rpmsg_device *rpdev)
 {
 	return lbrp_rpmsg_announce(rpdev, RPMSG_NS_CREATE);
 }
 
-
 // Tells the other side that we are about to delete the channel and it
 // will not be available for communication anymore.
+// Called automatically by the rpmsg core.
 static int lbrp_rpmsg_announce_destroy(struct rpmsg_device *rpdev)
 {
 	return lbrp_rpmsg_announce(rpdev, RPMSG_NS_DESTROY);
