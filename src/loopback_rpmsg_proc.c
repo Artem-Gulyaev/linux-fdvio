@@ -21,55 +21,17 @@
 
 #include "rpmsg_internal.h"
 
-/**
- * struct rpmsg_hdr - common header for all rpmsg messages
- * @src: source address
- * @dst: destination address
- * @reserved: reserved for future use
- * @len: length of payload (in bytes)
- * @flags: message flags
- * @data: @len bytes of message payload data
- *
- * Every message sent(/received) on the rpmsg bus begins with this header.
- */
-struct rpmsg_hdr {
-	u32 src;
-	u32 dst;
-	u32 reserved;
-	u16 len;
-	u16 flags;
-	u8 data[0];
-} __packed;
-
-/**
- * enum rpmsg_ns_flags - dynamic name service announcement flags
- *
- * @RPMSG_NS_CREATE: a new remote service was just created
- * @RPMSG_NS_DESTROY: a known remote service was just destroyed
- */
+// Dynamic name service announcement values.
+//
+// @RPMSG_NS_CREATE: a new remote service was just created
+// @RPMSG_NS_DESTROY: a known remote service was just destroyed
 enum rpmsg_ns_flags {
 	RPMSG_NS_CREATE		= 0,
 	RPMSG_NS_DESTROY	= 1,
 };
 
-/*
- * We're allocating buffers of 512 bytes each for communications. The
- * number of buffers will be computed from the number of buffers supported
- * by the vring, upto a maximum of 512 buffers (256 in each direction).
- *
- * Each buffer will have 16 bytes for the msg header and 496 bytes for
- * the payload.
- *
- * This will utilize a maximum total space of 256KB for the buffers.
- *
- * We might also want to add support for user-provided buffers in time.
- * This will allow bigger buffer size flexibility, and can also be used
- * to achieve zero-copy messaging.
- *
- * Note that these numbers are purely a decision of this driver - we
- * can change this without changing anything in the firmware of the remote
- * processor.
- */
+// NOTE: here used only to simulate current restrictions on the
+//  virtio rpmsg.
 #define MAX_RPMSG_NUM_BUFS	(512)
 #define MAX_RPMSG_BUF_SIZE	(512)
 
@@ -102,135 +64,32 @@ static int lbrp_rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src,
 
 
 
-static int rpmsg_probe(struct virtio_device *vdev)
-{
-	vq_callback_t *vq_cbs[] = { rpmsg_recv_done, rpmsg_xmit_done };
-	static const char * const names[] = { "input", "output" };
-	struct virtqueue *vqs[2];
-	struct virtproc_info *vrp;
-	void *bufs_va;
-	int err = 0, i;
-	size_t total_buf_space;
-	bool notify;
 
-	vrp = kzalloc(sizeof(*vrp), GFP_KERNEL);
-	if (!vrp)
-		return -ENOMEM;
-
-	vrp->vdev = vdev;
-
-	idr_init(&vrp->endpoints);
-	mutex_init(&vrp->endpoints_lock);
-	mutex_init(&vrp->tx_lock);
-	init_waitqueue_head(&vrp->sendq);
-
-	/* We expect two virtqueues, rx and tx (and in this order) */
-	err = virtio_find_vqs(vdev, 2, vqs, vq_cbs, names, NULL);
-	if (err)
-		goto free_vrp;
-
-	vrp->rvq = vqs[0];
-	vrp->svq = vqs[1];
-
-	/* we expect symmetric tx/rx vrings */
-	WARN_ON(virtqueue_get_vring_size(vrp->rvq) !=
-		virtqueue_get_vring_size(vrp->svq));
-
-	/* we need less buffers if vrings are small */
-	if (virtqueue_get_vring_size(vrp->rvq) < MAX_RPMSG_NUM_BUFS / 2)
-		vrp->num_bufs = virtqueue_get_vring_size(vrp->rvq) * 2;
-	else
-		vrp->num_bufs = MAX_RPMSG_NUM_BUFS;
-
-	vrp->buf_size = MAX_RPMSG_BUF_SIZE;
-
-	total_buf_space = vrp->num_bufs * vrp->buf_size;
-
-	/* allocate coherent memory for the buffers */
-	bufs_va = dma_alloc_coherent(vdev->dev.parent,
-				     total_buf_space, &vrp->bufs_dma,
-				     GFP_KERNEL);
-	if (!bufs_va) {
-		err = -ENOMEM;
-		goto vqs_del;
-	}
-
-	dev_dbg(&vdev->dev, "buffers: va %pK, dma %pad\n",
-		bufs_va, &vrp->bufs_dma);
-
-	/* half of the buffers is dedicated for RX */
-	vrp->rbufs = bufs_va;
-
-	/* and half is dedicated for TX */
-	vrp->sbufs = bufs_va + total_buf_space / 2;
-
-	/* set up the receive buffers */
-	for (i = 0; i < vrp->num_bufs / 2; i++) {
-		struct scatterlist sg;
-		void *cpu_addr = vrp->rbufs + i * vrp->buf_size;
-
-		rpmsg_sg_init(&sg, cpu_addr, vrp->buf_size);
-
-		err = virtqueue_add_inbuf(vrp->rvq, &sg, 1, cpu_addr,
-					  GFP_KERNEL);
-		WARN_ON(err); /* sanity check; this can't really happen */
-	}
-
-	/* suppress "tx-complete" interrupts */
-	virtqueue_disable_cb(vrp->svq);
-
-	vdev->priv = vrp;
-
-	/* if supported by the remote processor, enable the name service */
-	if (virtio_has_feature(vdev, VIRTIO_RPMSG_F_NS)) {
-		/* a dedicated endpoint handles the name service msgs */
-		vrp->ns_ept = __lbrp_rpmsg_create_ept(vrp, NULL, rpmsg_ns_cb,
-						vrp, RPMSG_NS_ADDR);
-		if (!vrp->ns_ept) {
-			dev_err(&vdev->dev, "failed to create the ns ept\n");
-			err = -ENOMEM;
-			goto free_coherent;
-		}
-	}
-
-	/*
-	 * Prepare to kick but don't notify yet - we can't do this before
-	 * device is ready.
-	 */
-	notify = virtqueue_kick_prepare(vrp->rvq);
-
-	/* From this point on, we can notify and get callbacks. */
-	virtio_device_ready(vdev);
-
-	/* tell the remote processor it can start sending messages */
-	/*
-	 * this might be concurrent with callbacks, but we are only
-	 * doing notify, not a full kick here, so that's ok.
-	 */
-	if (notify)
-		virtqueue_notify(vrp->rvq);
-
-	dev_info(&vdev->dev, "rpmsg host is online\n");
-
-	return 0;
-
-free_coherent:
-	dma_free_coherent(vdev->dev.parent, total_buf_space,
-			  bufs_va, vrp->bufs_dma);
-vqs_del:
-	vdev->config->del_vqs(vrp->vdev);
-free_vrp:
-	kfree(vrp);
-	return err;
-}
 
 ////////////////////--------------------////////////////////    VERIFIED BEGIN
 
 #define to_lbrp_rpmsg_channel_dev(_lbrp_ch_dev_ptr) \
 	container_of(_lbrp_ch_dev_ptr, struct lbrp_rpmsg_channel_dev, rpdev)
 
-
-#define LBRP_MAX_EPT_FILE_NAME_SIZE 20
+// NOTE: here used only to simulate the size restrictions for the messages.
+//
+// common header for all rpmsg messages
+// @src: source address
+// @dst: destination address
+// @reserved: reserved for future use
+// @len: length of payload (in bytes)
+// @flags: message flags
+// @data: @len bytes of message payload data
+//
+// Every message sent(/received) on the rpmsg bus begins with this header.
+struct rpmsg_hdr {
+	u32 src;
+	u32 dst;
+	u32 reserved;
+	u16 len;
+	u16 flags;
+	u8 data[0];
+} __packed;
 
 //
 // struct rpmsg_ns_msg - dynamic name service announcement message
@@ -255,8 +114,6 @@ struct rpmsg_announcement_entry {
 	struct list_head list_anchor;
     struct rpmsg_ns_msg msg;
 };
-
-////////////////////--------------------////////////////////    VERIFIED END
 
 // @list_anchor the anchor to embed the structure in the list
 // @src the address of the source of this message
@@ -330,7 +187,6 @@ struct lb_rpmsg_proc_dev {
 	struct mutex remote_services_lock;
 };
 
-////////////////////--------------------////////////////////    VERIFIED BEGIN
 //
 // The rpmsg channel representation (channel(service) device).
 // Created separately for each new chanel being created.
@@ -1131,19 +987,17 @@ found:
     int res = 0;
     if (__lbrp_remote_ept_push_rx_msg(rept, data, len, src) == NULL) {
         dev_err(lbrp->dev, "Failed to push the message to remote endpoint:"
-                " TX From 0x%x, To 0x%x, Len %d"
-                , msg->src, msg->dst, msg->len);
+                " TX From 0x%x, To 0x%x, Len %d", src, dst, len);
         res = -1;
     };
 
 	mutex_unlock(&rservice->epts_lock);
 
     if (res == 0) {
-        dev_dbg(dev, "TX From 0x%x, To 0x%x, Len %d, Flags %d, Reserved %d\n",
-            msg->src, msg->dst, msg->len, msg->flags, msg->reserved);
+        dev_dbg(dev, "TX From 0x%x, To 0x%x, Len %d\n", src, dst, len);
 #if defined(CONFIG_DYNAMIC_DEBUG)
-        dynamic_hex_dump("lbrp_rpmsg TX: ", DUMP_PREFIX_NONE, 16, 1,
-                 msg, sizeof(*msg) + msg->len, true);
+        dynamic_hex_dump("lbrp_rpmsg TX: ", DUMP_PREFIX_NONE, 16, 1
+                         , data, len, true);
 #endif
     }
 
@@ -1415,20 +1269,6 @@ void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
     mutex_unlock(&lbrp->remote_services_lock);
 }
 
-
- DESTROY SERVICE ENDPOINTS
-/ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-    mutex_lock(&service->epts_lock);
-    struct __lbrp_remote_ept *ept = NULL;
-    while (ept = list_first_entry_or_null(&service->epts_head)) {
-        __lbrp_remove_remote_ept(service, ept->addr);
-    }
-    mutex_unlock(&service->epts_lock);
-    
-/ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-
 // RETURNS: the lbrp device for given remote service
 struct lb_rpmsg_proc_dev * __lbrp_from_rservice(struct __lbrp_remote_service *rs)
 {
@@ -1548,7 +1388,7 @@ static struct rpmsg_device *lbrp_create_channel(
 	// their existence needs to be announced remotely
 	rpdev->announce = (rpdev->src != RPMSG_ADDR_ANY);
 	strncpy(rpdev->id.name, chinfo->name, RPMSG_NAME_SIZE);
-	rpdev->dev.parent = lbrp;
+	rpdev->dev.parent = lbrp->dev;
 	rpdev->dev.release = lbrp_rpmsg_release_device;
 
 	int res = rpmsg_register_device(rpdev);
@@ -1674,69 +1514,108 @@ static int lbrp_rpmsg_announce_destroy(struct rpmsg_device *rpdev)
 
 
 
+ DESTROY SERVICE ENDPOINTS
+/ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+    mutex_lock(&service->epts_lock);
+    struct __lbrp_remote_ept *ept = NULL;
+    while (ept = list_first_entry_or_null(&service->epts_head)) {
+        __lbrp_remove_remote_ept(service, ept->addr);
+    }
+    mutex_unlock(&service->epts_lock);
+    
+/ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 
 
 
+// create the instance of the driver for the device.
+static int lbrp_probe(struct device *dev)
+{
+    struct lb_rpmsg_proc_dev *lbrp = NULL;
+    lbrp = kzalloc(sizeof(*lbrp), GFP_KERNEL);
 
+    if (IS_ERR_OR_NULL(lbrp)) {
+        return -ENOMEM;
+    }
 
+    lbrp->dev = dev;
+	dev_set_drvdata(dev, lbrp);
 
+	idr_init(&lbrp->endpoints);
+	mutex_init(&lbrp->endpoints_lock);
+    INIT_LIST_HEAD(&lbrp->rpmsg_announcements);
+	mutex_init(&lbrp->rpmsg_announcements_lock);
+    INIT_LIST_HEAD(&lbrp->remote_services);
+	mutex_init(&lbrp->remote_services_lock);
 
+    lbrp->dev->groups = lbrp_dev_groups;
 
+	dev_info(lbrp->dev, "loopback rpmsg host is online\n");
 
+	return 0;
+}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-static int rpmsg_remove_device(struct device *dev, void *data)
+// Removes a single local rpmsg device.
+static int lbrp_remove_rpmsg_device(struct device *dev, void *data)
 {
 	device_unregister(dev);
 
 	return 0;
 }
 
-static void rpmsg_remove(struct virtio_device *vdev)
+// Removes all rpmsg devices and the main lbrp device.
+static void lbrp_remove(struct device *dev)
 {
-	struct virtproc_info *vrp = vdev->priv;
-	size_t total_buf_space = vrp->num_bufs * vrp->buf_size;
-	int ret;
+    struct lb_rpmsg_proc_dev *lbrp = dev_get_drvdata(dev, lbrp);
 
-	vdev->config->reset(vdev);
-
-	ret = device_for_each_child(&vdev->dev, NULL, rpmsg_remove_device);
-	if (ret)
+    // We need to destroy all local rpmsg channel devices first
+	int ret = device_for_each_child(dev, NULL, lbrp_remove_rpmsg_device);
+	if (ret) {
 		dev_warn(&vdev->dev, "can't remove rpmsg device: %d\n", ret);
+    }
 
-	if (vrp->ns_ept)
-		__rpmsg_remove_ept(vrp, vrp->ns_ept);
+	idr_destroy(&lbrp->endpoints);
 
-	idr_destroy(&vrp->endpoints);
+	mutex_destroy(&lbrp->endpoints_lock);
+	mutex_destroy(&lbrp->rpmsg_announcements_lock);
+	mutex_destroy(&lbrp->remote_services_lock);
 
-	vdev->config->del_vqs(vrp->vdev);
 
-	dma_free_coherent(vdev->dev.parent, total_buf_space,
-			  vrp->rbufs, vrp->bufs_dma);
 
-	kfree(vrp);
+
+    lbrp->dev = dev;
+	idr_init(&lbrp->endpoints);
+    INIT_LIST_HEAD(&lbrp->rpmsg_announcements);
+    INIT_LIST_HEAD(&lbrp->remote_services);
+
+
+
+
+	dev_info(lbrp->dev, "loopback rpmsg host is closed\n");
+
+	kfree(lbrp);
 }
+
+////////////////////--------------------////////////////////    VERIFIED BEGIN
+// List containing default attributes of lbrp device.
+//
+// @dev_attr_announcements exposes the announcements of the services
+//      created on the local end.
+// @dev_attr_create_ept creates the "remote" endpoint which will be
+//      accociated with the local file.
+// @dev_attr_remove_ept removes the "remote" endpoint which is
+//      accociated with the local file.
+static struct attribute *lbrp_dev_attrs[] = {
+	&dev_attr_announcements.attr,
+	&dev_attr_create_ept.attr,
+	&dev_attr_remove_ept.attr,
+	NULL,
+};
+////////////////////--------------------////////////////////    VERIFIED END
+
+ATTRIBUTE_GROUPS(lbrp_dev);
+
 
 static struct virtio_driver virtio_ipc_driver = {
 	.feature_table	= features,
@@ -1744,8 +1623,8 @@ static struct virtio_driver virtio_ipc_driver = {
 	.driver.name	= KBUILD_MODNAME,
 	.driver.owner	= THIS_MODULE,
 	.id_table	= id_table,
-	.probe		= rpmsg_probe,
-	.remove		= rpmsg_remove,
+	.probe		= lbrp_probe,
+	.remove		= lbrp_remove,
 };
 
 static int __init rpmsg_init(void)
