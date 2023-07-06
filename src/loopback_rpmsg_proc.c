@@ -21,9 +21,6 @@
 
 #include "rpmsg_internal.h"
 
-/* The feature bitmap for virtio rpmsg */
-#define VIRTIO_RPMSG_F_NS	0 /* RP supports name service notifications */
-
 /**
  * struct rpmsg_hdr - common header for all rpmsg messages
  * @src: source address
@@ -278,12 +275,14 @@ struct __lbrp_remote_ept_msg {
 // @msgs_head the head of the incoming messages list
 // @msgs_lock the incoming messages list lock
 // @sysfs_attr sysfs attribute, also contains the file name and file mode
+// @service service to which the ept belongs.
 struct __lbrp_remote_ept {
     uint32_t addr;
 	struct list_head list_anchor;
 	struct list_head rx_msgs_head;
 	struct mutex rx_msgs_lock;
     struct attribute sysfs_attr;
+	struct __lbrp_remote_service service;
 };
  
 // represents the remote service
@@ -612,6 +611,7 @@ static ssize_t create_ept_store(
     }
 
     bool channel_existed = false;
+    // NOTE: service will have refcount ++ after this call.
     struct __lbrp_remote_service *rservice = __lbrp_create_remote_service(
                                                      lbrp, name
                                                      , &channel_existed);
@@ -632,10 +632,8 @@ static ssize_t create_ept_store(
     // endpoint holds a ref to the service, from now on
     __lbrp_put_remote_service(rservice);
 
-
-
     // if the channel was just created, then we notify the "other" side
-    // about its creation
+    // about its creation ("other" means local in this case)
     if (!channel_existed) {
         struct rpmsg_ns_msg msg;
         strncpy(msg.name, service_name, sizeof(msg.name));
@@ -725,6 +723,7 @@ static ssize_t remove_ept_store(
 
     __lbrp_remove_remote_ept(service, remote_addr, true);
 
+    // dropping our own ref to service
     __lbrp_put_remote_service(rservice);
 	return count;
 
@@ -743,33 +742,6 @@ error:
 }
 static DEVICE_ATTR_WO(remove_ept);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // Endpoint file read operation.
 //
 //     * to read one incoming message out of queue
@@ -778,23 +750,31 @@ static DEVICE_ATTR_WO(remove_ept);
 static ssize_t __lbrp_service_ept_attr_show(
 				struct kobject *kobj, struct attribute *attr, char *buf)
 {
-	struct __lbrp_remote_ept *ept
+	struct __lbrp_remote_ept *rept
 				= container_of(attr, struct __lbrp_remote_ept, sysfs_attr);
-
-	struct __lbrp_remote_ept_msg *msg = __lbrp_remote_ept_pop_rx_msg(ept);
+	struct lb_rpmsg_proc_dev *lbrp = __lbrp_from_rservice(rept->service);
+	struct __lbrp_remote_ept_msg *msg = __lbrp_remote_ept_pop_rx_msg(rept);
 
 	if (!msg) {
 		return 0;
 	}
+    if (sizeof(msg->src) + msg->data_len_bytes > PAGE_SIZE) {
+        def_err(lbrp->dev, "too big message to show via sysfs: "
+                "len: %d, source: %d\n", msg->data_len_bytes
+                , msg->src);
+	    __lbrp_remote_ept_destroy_rx_msg(msg);
+        return 0;
+    }
 
 	ssize_t len = 0;
 
-	// 4 bytes of the size
-	*((uint32_t *)buf) = (uint32_t)len;
-	len += 4;
+	// 4 bytes of the source addr
+	*((uint32_t *)buf) = msg->src;
+	len += sizeof(msg->src);
+
 
 	// the data itself
-	memcpy(buf + sizeof(uint32_t), msg->data, len);
+	memcpy(buf + len, msg->data, msg->data_len_bytes);
 	len += msg->data_len_bytes;
 
 	__lbrp_remote_ept_destroy_rx_msg(msg);
@@ -810,149 +790,64 @@ static ssize_t __lbrp_service_ept_attr_store(
 				struct kobject *kobj, struct attribute *attr
 			    , const char *buf, size_t count)
 {
-	struct __lbrp_remote_ept *ept
+	struct __lbrp_remote_ept *rept
 				= container_of(attr, struct __lbrp_remote_ept, sysfs_attr);
+	struct lb_rpmsg_proc_dev * lbrp = __lbrp_from_rservice(rept->service);
 
 	if (count <= sizeof(uint32_t)) {
-		return -EINVAL;
+		dev_warn(dev, "to small message, len: %d\n", count);
+		goto usage;
 	}
 
 	uint32_t msg_len = count - sizeof(uint32_t);
 	char *msg_data = buf + sizeof(uint32_t);
-
 	// first 4 bytes of destination
 	uint32_t dst = *((uint32_t *)buf);
 
-
-
-
-
-
-
-
-
-
-	dev_dbg(dev, "From: 0x%x, To: 0x%x, Len: %d, Flags: %d, Reserved: %d\n",
-		msg->src, msg->dst, msg->len, msg->flags, msg->reserved);
-#if defined(CONFIG_DYNAMIC_DEBUG)
-	dynamic_hex_dump("rpmsg_virtio RX: ", DUMP_PREFIX_NONE, 16, 1,
-			 msg, sizeof(*msg) + msg->len, true);
-#endif
-
-
 	// to match the virtio logic
-	if (len > vrp->buf_size ||
-	    msg->len > (len - sizeof(struct rpmsg_hdr))) {
+	if (msg_len > MAX_RPMSG_BUF_SIZE - sizeof(struct rpmsg_hdr)) {
 		dev_warn(dev, "inbound msg too big: (%d, %d)\n", len, msg->len);
 		return -EINVAL;
 	}
 
+	dev_dbg(lbrp->dev, "From: 0x%x, To: 0x%x, Len: %d, (userspace len: %d)\n"
+			, rept->addr, dst, msg_len, count);
+#if defined(CONFIG_DYNAMIC_DEBUG)
+	dynamic_hex_dump("lbrp RX: ", DUMP_PREFIX_NONE, 16, 1
+			 		 , msg_data, msg_len, true);
+#endif
 
-	/* use the dst addr to fetch the callback of the appropriate user */
-	mutex_lock(&vrp->endpoints_lock);
-
-	ept = idr_find(&vrp->endpoints, msg->dst);
-
-	/* let's make sure no one deallocates ept while we use it */
-	if (ept)
-		kref_get(&ept->refcount);
-
-	mutex_unlock(&vrp->endpoints_lock);
-
-
-
+	mutex_lock(&lbrp->endpoints_lock);
+	struct rpmsg_endpoint *ept = idr_find(&lbrp->endpoints, dst);
 	if (ept) {
-		/* make sure ept->cb doesn't go away while we use it */
+		kref_get(&ept->refcount);
+	}
+	mutex_unlock(&lbrp->endpoints_lock);
+
+    // And actually deliver the message to local consumer
+	if (ept) {
 		mutex_lock(&ept->cb_lock);
-
-		if (ept->cb)
-			ept->cb(ept->rpdev, msg->data, msg->len, ept->priv,
-				msg->src);
-
+		if (ept->cb) {
+			ept->cb(ept->rpdev, msg_data, msg_len, ept->priv, rept->addr);
+            // NOTE: the data buffer will not be used by consumer
+            //      after callback is returned.
+        }
 		mutex_unlock(&ept->cb_lock);
 
-		/* farewell, ept, we don't need you anymore */
 		kref_put(&ept->refcount, __ept_on_refcount0);
-	} else
+	} else {
 		dev_warn(dev, "msg received with no recipient\n");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    }
 
 	return count;
+
+usage:
+	dev_err(lbrp->dev, "Write format is: 4 bytes of dst addr + raw payload.\n"
+                       "  NOTE: min payload length is: %d\n"
+                       "  NOTE: max payload length is: %d\n"
+            , 1, MAX_RPMSG_BUF_SIZE - sizeof(struct rpmsg_hdr));
+	return -EINVAL;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // Creates/gets an endpoint with given own address for the given service.
 // NOTE: if endpoint already exists is is not an error.
@@ -973,7 +868,7 @@ struct __lbrp_remote_ept *__lbrp_create_remote_ept(
         return NULL;
     }
 
-    struct lb_rpmsg_proc_dev * lbrp = __lbrp_from_service(service);
+    struct lb_rpmsg_proc_dev * lbrp = __lbrp_from_rservice(service);
 
     if (IS_ERR_OR_NULL(lbrp)) {
         pr_err("No lbrp to work with.");
@@ -1001,6 +896,7 @@ struct __lbrp_remote_ept *__lbrp_create_remote_ept(
     INIT_LIST_HEAD(&ept->list_anchor);
     INIT_LIST_HEAD(&ept->rx_msgs_head);
     mutex_init(&ept->rx_msgs_lock);
+    ept->service = service;
 
     mutex_lock(&service->epts_lock);
     struct __lbrp_remote_ept *te = NULL;
@@ -1052,7 +948,7 @@ void __lbrp_remove_remote_ept(
             , uint32_t own_address
             , const bool list_lock_needed)
 {
-    struct lb_rpmsg_proc_dev * lbrp = __lbrp_from_service(service);
+    struct lb_rpmsg_proc_dev * lbrp = __lbrp_from_rservice(service);
 
     dev_info(lbrp->dev, "removing ept %d of %s service"
              , own_address, service->name);
@@ -1452,6 +1348,8 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
 }
 
 // Removes the remote service
+// Also drops it from the remote services list of the lbrp.
+//
 // NOTE: MUST BE CALLED ONLY FROM DESTRUCTOR, don't call it directly!
 //
 // @kobject the pointer to the kobj of the service.
@@ -1461,7 +1359,7 @@ void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
     struct __lbrp_remote_service *service
         = container_of(kobject, struct __lbrp_remote_service, kobj);
 
-    struct lb_rpmsg_proc_dev *lbrp = __lbrp_from_service(service);
+    struct lb_rpmsg_proc_dev *lbrp = __lbrp_from_rservice(service);
 
     if (IS_ERR_OR_NULL(lbrp)) {
         pr_err("Can't remove service: no device.");
@@ -1487,8 +1385,6 @@ void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
 
     list_del(&service->list_anchor);
 
-    mutex_unlock(&lbrp->remote_services_lock);
-
     // Notifying the "other" side about service removal
 
     {
@@ -1500,7 +1396,28 @@ void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
         lb_rpmsg_service_ctl(lbrp, &msg);
     }
 
-    // Ok, now dropping all endpoints of the service
+    // NO need to remote endpoints, cause we can be released only
+    // when endpoints are destroyed alreay.
+
+    mutex_lock(&service->epts_lock);
+    struct __lbrp_remote_ept *ept = list_first_entry_or_null(&service->epts_head);
+    if (ept) {
+        dev_err(lbrp->dev, "Service destroyed while there were endpoints.")
+    }
+    mutex_unlock(&service->epts_lock);
+
+    mutex_destroy(&service->epts_lock);
+
+    dev_info(lbrp->dev, "removed remote service: %s", service.name);
+
+    free(service);
+
+    mutex_unlock(&lbrp->remote_services_lock);
+}
+
+
+ DESTROY SERVICE ENDPOINTS
+/ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
     mutex_lock(&service->epts_lock);
     struct __lbrp_remote_ept *ept = NULL;
@@ -1509,15 +1426,11 @@ void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
     }
     mutex_unlock(&service->epts_lock);
     
-    mutex_destroy(&service->epts_lock);
+/ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
-    dev_info(lbrp->dev, "removed remote service: %s", service.name);
 
-    free(service);
-}
-
-// RETURNS: the lbrp device for given service
-struct lb_rpmsg_proc_dev * __lbrp_from_service(struct __lbrp_remote_service *rs)
+// RETURNS: the lbrp device for given remote service
+struct lb_rpmsg_proc_dev * __lbrp_from_rservice(struct __lbrp_remote_service *rs)
 {
     struct device *lbrp_dev = container_of(rs->kobj->parent, struct device, kobj);
     return (struct lb_rpmsg_proc_dev *)dev_get_drvdata(lbrp_dev);
@@ -1793,15 +1706,6 @@ static int lbrp_rpmsg_announce_destroy(struct rpmsg_device *rpdev)
 
 
 
-
-
-
-
-
-
-
-
-
 static int rpmsg_remove_device(struct device *dev, void *data)
 {
 	device_unregister(dev);
@@ -1833,15 +1737,6 @@ static void rpmsg_remove(struct virtio_device *vdev)
 
 	kfree(vrp);
 }
-
-static struct virtio_device_id id_table[] = {
-	{ VIRTIO_ID_RPMSG, VIRTIO_DEV_ANY_ID },
-	{ 0 },
-};
-
-static unsigned int features[] = {
-	VIRTIO_RPMSG_F_NS,
-};
 
 static struct virtio_driver virtio_ipc_driver = {
 	.feature_table	= features,
