@@ -21,29 +21,35 @@
 
 #include "rpmsg_internal.h"
 
+//-------------------------------- ENUMS ------------------------------------//
+
 // Dynamic name service announcement values.
 //
 // @RPMSG_NS_CREATE: a new remote service was just created
 // @RPMSG_NS_DESTROY: a known remote service was just destroyed
 enum rpmsg_ns_flags {
-	RPMSG_NS_CREATE		= 0,
-	RPMSG_NS_DESTROY	= 1,
+	RPMSG_NS_CREATE	= 0,
+	RPMSG_NS_DESTROY = 1,
 };
+
+//------------------------ CONFIGURATION MACROS -----------------------------//
+
+#define LBRP_DEV_NAME "lbrp"
 
 // NOTE: here used only to simulate current restrictions on the
 //  virtio rpmsg.
 #define MAX_RPMSG_NUM_BUFS	(512)
 #define MAX_RPMSG_BUF_SIZE	(512)
 
-/*
- * Local addresses are dynamically allocated on-demand.
- * We do not dynamically assign addresses from the low 1024 range,
- * in order to reserve that address range for predefined services.
- */
+// Local addresses are dynamically allocated on-demand.
+// We do not dynamically assign addresses from the low 1024 range,
+// in order to reserve that address range for predefined services.
 #define RPMSG_RESERVED_ADDRESSES	(1024)
 
-/* Address 53 is reserved for advertising remote services */
+// Address 53 is reserved for advertising remote services
 #define RPMSG_NS_ADDR			(53)
+
+//------------------------ FORWARD DECLARATIONS -----------------------------//
 
 static void lbrp_rpmsg_destroy_ept(struct rpmsg_endpoint *ept);
 static int lbrp_rpmsg_send(struct rpmsg_endpoint *ept, void *data, int len);
@@ -57,19 +63,12 @@ static int lbrp_rpmsg_trysendto(struct rpmsg_endpoint *ept, void *data,
 static int lbrp_rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src,
 					   u32 dst, void *data, int len);
 
-
-
-
-
-
-
-
-
-
-////////////////////--------------------////////////////////    VERIFIED BEGIN
+//-------------------------- HELPER MACROS ----------------------------------//
 
 #define to_lbrp_rpmsg_channel_dev(_lbrp_ch_dev_ptr) \
 	container_of(_lbrp_ch_dev_ptr, struct lbrp_rpmsg_channel_dev, rpdev)
+
+//----------------------------- STRUCTS -------------------------------------//
 
 // NOTE: here used only to simulate the size restrictions for the messages.
 //
@@ -299,7 +298,7 @@ static const struct rpmsg_endpoint_ops lbrp_endpoint_ops = {
 // Rpmsg on refcount->0 destructor.
 // @kref: the ept's reference count
 // Called automatically when refcount of ept reaches 0.
-static void __ept_on_refcount0(struct kref *kref)
+static void __ept_on_refcnt0(struct kref *kref)
 {
 	struct rpmsg_endpoint *ept = container_of(kref, struct rpmsg_endpoint,
 						  refcount);
@@ -381,7 +380,7 @@ static struct rpmsg_endpoint *__lbrp_rpmsg_create_ept(
 
 free_ept:
 	mutex_unlock(&lbrp->endpoints_lock);
-	kref_put(&ept->refcount, __ept_on_refcount0);
+	kref_put(&ept->refcount, __ept_on_refcnt0);
 	return NULL;
 }
 
@@ -401,7 +400,7 @@ __rpmsg_remove_ept(struct lb_rpmsg_proc_dev *lbrp, struct rpmsg_endpoint *ept)
 	ept->cb = NULL;
 	mutex_unlock(&ept->cb_lock);
 
-	kref_put(&ept->refcount, __ept_on_refcount0);
+	kref_put(&ept->refcount, __ept_on_refcnt0);
 }
 
 // Gets called by the rpmsg framework when the destruction of the
@@ -690,7 +689,7 @@ static ssize_t __lbrp_service_ept_attr_store(
         }
 		mutex_unlock(&ept->cb_lock);
 
-		kref_put(&ept->refcount, __ept_on_refcount0);
+		kref_put(&ept->refcount, __ept_on_refcnt0);
 	} else {
 		dev_warn(dev, "msg received with no recipient\n");
     }
@@ -1401,6 +1400,35 @@ static struct rpmsg_device *lbrp_create_channel(
 	return rpdev;
 }
 
+// Pops the announcement from the announcement queue. If queue is empty
+// returns NULL.
+//
+// RETURNS:
+//      !NULL: the first announcement
+struct rpmsg_announcement_entry *entry __lbrp_remote_announcement_pop(
+	        struct lb_rpmsg_proc_dev *lbrp)
+{
+    mutex_lock(&lbrp->rpmsg_announcements_lock);
+    struct rpmsg_announcement_entry *entry
+                = list_first_entry_or_null(&lbrp->rpmsg_announcements
+                                           , struct rpmsg_announcement_entry
+                                           , list_anchor);
+    if (!IS_ERR_OR_NULL(entry)) {
+        list_del(&entry->list_anchor);
+    }
+
+    mutex_unlock(&lbrp->rpmsg_announcements_lock);
+
+    return entry;
+}
+
+// destroys the remote announcement.
+// NOTE: the announcement must be already removed from the list
+void __lbrp_remote_announcement_destroy(struct rpmsg_announcement_entry *entry)
+{
+    free(entry);
+}
+
 // Provides the lbrp rpmsg announcementes to the userland. Is called whenever
 // userland reads the announcements file from sysfs.
 // It provides one announcement on each read.
@@ -1418,30 +1446,19 @@ static ssize_t announcements_show(
 {
 	struct lb_rpmsg_proc_dev *lbrp
                 = (struct lb_rpmsg_proc_dev *)dev_get_drvdata(dev);
-    ssize_t length = 0;
 
-    mutex_lock(&lbrp->rpmsg_announcements_lock);
+    struct rpmsg_announcement_entry *entry
+            = __lbrp_remote_announcement_pop(lbrp);
 
-	if (list_empty(&lbrp->rpmsg_announcements)) {
-        goto done;
+    if (IS_ERR_OR_NULL(entry)) {
+        return 0;
     }
 
-    // we tell only one announcement per single read
-    struct rpmsg_announcement_entry *entry = container_of(
-                    lbrp->rpmsg_announcements.next
-			        , struct rpmsg_announcement_entry
-			        , list_anchor);
-    
+    ssize_t length = scnprintf(buf, PAGE_SIZE, "%s:%d:%s"
+                               , entry->msg, entry->addr
+                               , flags & RPMSG_NS_DESTROY ? "d" : "c");
 
-	length = scnprintf(buf, PAGE_SIZE, "%s:%d:%s"
-                       , entry->msg, entry->addr
-                       , flags & RPMSG_NS_DESTROY ? "d" : "c");
-
-    list_del(&entry->list_anchor);
-    free(entry);
-
-done:
-    mutex_unlock(&lbrp->rpmsg_announcements_lock);
+    __lbrp_remote_announcement_destroy(entry);
 
 	return length;
 }
@@ -1494,40 +1511,7 @@ static int lbrp_rpmsg_announce_destroy(struct rpmsg_device *rpdev)
 	return lbrp_rpmsg_announce(rpdev, RPMSG_NS_DESTROY);
 }
 
-////////////////////--------------------////////////////////    VERIFIED END
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
- DESTROY SERVICE ENDPOINTS
-/ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-    mutex_lock(&service->epts_lock);
-    struct __lbrp_remote_ept *ept = NULL;
-    while (ept = list_first_entry_or_null(&service->epts_head)) {
-        __lbrp_remove_remote_ept(service, ept->addr);
-    }
-    mutex_unlock(&service->epts_lock);
-    
-/ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-
-
+//----------------------------- ORG SECTION ---------------------------------//
 
 // create the instance of the driver for the device.
 static int lbrp_probe(struct device *dev)
@@ -1549,14 +1533,13 @@ static int lbrp_probe(struct device *dev)
     INIT_LIST_HEAD(&lbrp->remote_services);
 	mutex_init(&lbrp->remote_services_lock);
 
-    lbrp->dev->groups = lbrp_dev_groups;
-
 	dev_info(lbrp->dev, "loopback rpmsg host is online\n");
 
 	return 0;
 }
 
-// Removes a single local rpmsg device.
+// Removes a single local rpmsg device (one which was created by
+// new channel announcement from the other side).
 static int lbrp_remove_rpmsg_device(struct device *dev, void *data)
 {
 	device_unregister(dev);
@@ -1569,7 +1552,28 @@ static void lbrp_remove(struct device *dev)
 {
     struct lb_rpmsg_proc_dev *lbrp = dev_get_drvdata(dev, lbrp);
 
-    // We need to destroy all local rpmsg channel devices first
+    // Remote section
+    
+    // remove all remote endpoints first
+    // NOTE: this will automatically remove all remote services as well
+    //      and all local services which were created to match them.
+    mutex_lock(&service->epts_lock);
+    struct __lbrp_remote_ept *ept = NULL;
+    while (ept = list_first_entry_or_null(&service->epts_head)) {
+        __lbrp_remove_remote_ept(service, ept->addr);
+    }
+    mutex_unlock(&service->epts_lock);
+
+    // remove all pending announcements
+    struct rpmsg_announcement_entry *entry
+    while (entry = __lbrp_remote_announcement_pop(lbrp)) {
+        __lbrp_remote_announcement_destroy(entry);
+    }
+
+    // Local section
+
+    // We need to destroy all local rpmsg channel devices which are still
+    // there (were not created/related to the remote services)
 	int ret = device_for_each_child(dev, NULL, lbrp_remove_rpmsg_device);
 	if (ret) {
 		dev_warn(&vdev->dev, "can't remove rpmsg device: %d\n", ret);
@@ -1577,27 +1581,19 @@ static void lbrp_remove(struct device *dev)
 
 	idr_destroy(&lbrp->endpoints);
 
+    // Members section
+
 	mutex_destroy(&lbrp->endpoints_lock);
 	mutex_destroy(&lbrp->rpmsg_announcements_lock);
 	mutex_destroy(&lbrp->remote_services_lock);
 
-
-
-
-    lbrp->dev = dev;
-	idr_init(&lbrp->endpoints);
-    INIT_LIST_HEAD(&lbrp->rpmsg_announcements);
-    INIT_LIST_HEAD(&lbrp->remote_services);
-
-
-
+	dev_set_drvdata(dev, NULL);
 
 	dev_info(lbrp->dev, "loopback rpmsg host is closed\n");
 
 	kfree(lbrp);
 }
 
-////////////////////--------------------////////////////////    VERIFIED BEGIN
 // List containing default attributes of lbrp device.
 //
 // @dev_attr_announcements exposes the announcements of the services
@@ -1612,39 +1608,69 @@ static struct attribute *lbrp_dev_attrs[] = {
 	&dev_attr_remove_ept.attr,
 	NULL,
 };
-////////////////////--------------------////////////////////    VERIFIED END
-
 ATTRIBUTE_GROUPS(lbrp_dev);
 
-
-static struct virtio_driver virtio_ipc_driver = {
-	.feature_table	= features,
-	.feature_table_size = ARRAY_SIZE(features),
-	.driver.name	= KBUILD_MODNAME,
-	.driver.owner	= THIS_MODULE,
-	.id_table	= id_table,
-	.probe		= lbrp_probe,
-	.remove		= lbrp_remove,
+// The Lbrp driver compatible definition for
+// matching the driver to devices available
+//
+// @compatible name of compatible driver
+struct of_device_id lbrp_driver_id[] = {
+	{
+		.compatible = "loopback_rpmsg",
+	}
 };
 
-static int __init rpmsg_init(void)
+// The Lbrp driver definition
+//
+// @probe probe device function
+// @remove remove device function
+// @driver structure driver definition
+// @driver::owner the module owner
+// @driver::name name of driver
+// @driver::of_match_table compatible driver devices
+// @driver::dev_groups devices groups with all attributes
+struct platform_driver lbrp_driver = {
+	.probe = lbrp_probe,
+	.remove = lbrp_remove,
+	.driver = {
+		.owner = THIS_MODULE,
+		.name = "lbrp",
+		.of_match_table = lbrp_driver_id,
+		.dev_groups = lbrp_dev_groups
+	}
+};
+
+// No need to overinvent here, we just create the lbrp device
+// on init, and remove it on exit.
+static int __init lbrp_init(void)
 {
-	int ret;
+	struct platform_device * new_pdev = 
+		    platform_device_register_simple(LBRP_DEV_NAME, 1, NULL, 0);
 
-	ret = register_virtio_driver(&virtio_ipc_driver);
-	if (ret)
-		pr_err("failed to register virtio driver: %d\n", ret);
+	if (IS_ERR_OR_NULL(new_pdev)) {
+		pr_err("Could not register the lbrp device.");
+		return -EFAULT;
+	}
 
-	return ret;
+	return 0;
 }
-subsys_initcall(rpmsg_init);
+module_init(lbrp_init);
 
-static void __exit rpmsg_fini(void)
+static void __exit lbrp_exit(void)
 {
-	unregister_virtio_driver(&virtio_ipc_driver);
+	struct device *lbrp_dev = 
+		bus_find_device_by_name(&platform_bus_type, NULL, LBRP_DEV_NAME);
+
+	if (IS_ERR_OR_NULL(lbrp_dev)) {
+		pr_err("Lbrp device is null: something got broken.");
+		return;
+	}
+
+	platform_device_unregister(to_platform_device(lbrp_device));
 }
-module_exit(rpmsg_fini);
+module_exit(lbrp_exit);
 
 MODULE_DEVICE_TABLE(virtio, id_table);
-MODULE_DESCRIPTION("Rpmsg loopback processor for testing");
+MODULE_DESCRIPTION("Rpmsg loopback processor for testing rpmsg device driver.");
 MODULE_LICENSE("GPL v2");
+
