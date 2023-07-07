@@ -558,9 +558,8 @@ int __fdvio_goto_xfer(
 
 	fdvio->delayed_xfer_request = false;
 
-	res = rpmsg_sendto(fdvio->rpdev->ept, fdvio->xfer->data_tx
-				, fdvio->xfer->size_bytes
-				, fdvio->rpdev->dst);
+	res = rpmsg_send(fdvio->rpdev->ept, fdvio->xfer->data_tx
+				, fdvio->xfer->size_bytes);
 	if (res != 0) {
 		fdvio_err("The rpmsg_send 0x%x -> 0x%x, data size %zu failed with"
 					" code: %d", fdvio->rpdev->src, fdvio->rpdev->dst
@@ -1124,8 +1123,17 @@ static void fdvio_remove(struct rpmsg_device *rpdev)
 
 /* --------------------- MODULE HOUSEKEEPING SECTION ------------------- */
 
+// NOTE: the other side announces the available channels, using the
+//  names as identifiers, and those names are matched via the names
+//  in this table.
+// NOTE: after the match in this table is found the channel is created,
+//  with proper endpoint and the corresponding (in our case our) driver
+//  is probed.
+//
+//  The list of compatible RPMSG channels (by their names, which also
+//  used on the other side to announce them):
 static struct rpmsg_device_id fdvio_id_table[] = {
-	{ .name = "fdvio"
+	{ .name = "fdvio_rpmsg"
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
         , .driver_data = 0
 #endif

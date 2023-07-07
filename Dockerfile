@@ -33,6 +33,7 @@ COPY . .
 
 # x86
 RUN make -C ${kernel_source_dir_x86} M=${repo_path} \
+        KDIR=${kernel_source_dir_x86} \
         CONFIG_BOSCH_DRIVERS=y \
         CONFIG_BOSCH_FDVIO_DRIVER=m \
         CONFIG_CHECK_SIGNATURE=n
@@ -42,10 +43,13 @@ RUN mkdir -p ${INITRAMFS_CHROOT_X86}/modules              \
         ${INITRAMFS_CHROOT_X86}/modules/
 
 # ARM
-RUN make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- -C ${kernel_source_dir_arm} M=${repo_path} \
-        CONFIG_BOSCH_DRIVERS=y \
-        CONFIG_BOSCH_FDVIO_DRIVER=m \
-        CONFIG_CHECK_SIGNATURE=n
+RUN make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- \
+            -C ${kernel_source_dir_arm} \
+            M=${repo_path} \
+            KDIR=${kernel_source_dir_arm} \
+            CONFIG_BOSCH_DRIVERS=y \
+            CONFIG_BOSCH_FDVIO_DRIVER=m \
+            CONFIG_CHECK_SIGNATURE=n
 
 RUN mkdir -p ${INITRAMFS_CHROOT_ARM}/modules              \
     && cp ${repo_path}/src/fdvio.ko         \

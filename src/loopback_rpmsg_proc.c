@@ -49,19 +49,108 @@ enum rpmsg_ns_flags {
 // Address 53 is reserved for advertising remote services
 #define RPMSG_NS_ADDR			(53)
 
-//------------------------ FORWARD DECLARATIONS -----------------------------//
+//------------------------ FORWARD DECLARATIONS (STRUCTS) -------------------//
 
-static void lbrp_rpmsg_destroy_ept(struct rpmsg_endpoint *ept);
+struct rpmsg_hdr;
+struct rpmsg_ns_msg;
+struct rpmsg_announcement_entry;
+struct __lbrp_remote_ept_msg;
+struct __lbrp_remote_ept;
+struct __lbrp_remote_service;
+struct lb_rpmsg_proc_dev;
+struct lbrp_rpmsg_channel_dev;
+
+//------------------------ FORWARD DECLARATIONS (FUNCTIONS) -----------------//
+
+static void __ept_on_refcnt0(struct kref *kref);
+static struct rpmsg_endpoint *lbrp_rpmsg_create_ept(
+                struct rpmsg_device *rpdev
+                , rpmsg_rx_cb_t cb
+                , void *priv
+                , struct rpmsg_channel_info chinfo);
+static struct rpmsg_endpoint *__lbrp_rpmsg_create_ept(
+                struct lb_rpmsg_proc_dev *lbrp
+				, struct rpmsg_device *rpdev
+				, rpmsg_rx_cb_t cb
+				, void *priv
+                , u32 local_addr);
+static void __rpmsg_remove_ept(struct lb_rpmsg_proc_dev *lbrp
+                , struct rpmsg_endpoint *ept);
+static void virtio_rpmsg_destroy_ept(struct rpmsg_endpoint *ept);
+static ssize_t create_ept_store(
+                struct device *dev, struct device_attribute *attr
+                , const char *buf, size_t count);
+static ssize_t remove_ept_store(
+                struct device *dev, struct device_attribute *attr
+                , const char *buf, size_t count);
+static ssize_t __lbrp_service_ept_attr_show(
+                struct kobject *kobj, struct attribute *attr, char *buf);
+static ssize_t __lbrp_service_ept_attr_store(
+				struct kobject *kobj, struct attribute *attr
+			    , const char *buf, size_t count);
+struct __lbrp_remote_ept *__lbrp_create_remote_ept(
+                struct __lbrp_remote_service *service
+                , uint32_t own_address);
+void __lbrp_remove_remote_ept(
+                struct __lbrp_remote_service *service
+                , uint32_t own_address
+                , const bool list_lock_needed);
+struct __lbrp_remote_ept_msg *__lbrp_remote_ept_push_rx_msg(
+                struct __lbrp_remote_ept *ept
+                , char *data, size_t data_len_bytes
+                , uint32_t msg_src);
+static int lbrp_send_offchannel_raw(
+                struct rpmsg_device *rpdev
+				, u32 src, u32 dst
+				, void *data, int len, bool wait);
 static int lbrp_rpmsg_send(struct rpmsg_endpoint *ept, void *data, int len);
-static int lbrp_rpmsg_sendto(struct rpmsg_endpoint *ept, void *data, int len,
-			       u32 dst);
-static int lbrp_rpmsg_send_offchannel(struct rpmsg_endpoint *ept, u32 src,
-					u32 dst, void *data, int len);
+static int lbrp_rpmsg_sendto(struct rpmsg_endpoint *ept, void *data
+                , int len, u32 dst);
+static int lbrp_rpmsg_send_offchannel(struct rpmsg_endpoint *ept, u32 src
+				, u32 dst, void *data, int len);
 static int lbrp_rpmsg_trysend(struct rpmsg_endpoint *ept, void *data, int len);
-static int lbrp_rpmsg_trysendto(struct rpmsg_endpoint *ept, void *data,
-				  int len, u32 dst);
-static int lbrp_rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src,
-					   u32 dst, void *data, int len);
+static int lbrp_rpmsg_trysendto(struct rpmsg_endpoint *ept, void *data
+                , int len, u32 dst);
+static int lbrp_rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src
+				, u32 dst, void *data, int len);
+struct __lbrp_remote_ept_msg *__lbrp_remote_ept_pop_rx_msg(
+                struct __lbrp_remote_ept *ept);
+void __lbrp_remote_ept_destroy_rx_msg(struct __lbrp_remote_ept_msg *msg);
+struct __lbrp_remote_service *__lbrp_get_remote_service(
+                struct lb_rpmsg_proc_dev *lbrp
+                , char *name);
+void __lbrp_put_remote_service(
+                struct __lbrp_remote_service *service);
+void __lbrp_get_remote_service_by_ptr(
+                struct __lbrp_remote_service *service);
+struct __lbrp_remote_service *__lbrp_create_remote_service(
+                struct lb_rpmsg_proc_dev *lbrp
+                , char *name
+                , bool *existed__out);
+void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject);
+struct lb_rpmsg_proc_dev * __lbrp_from_rservice(
+                struct __lbrp_remote_service *rs);
+static int lb_rpmsg_service_ctl(
+                struct lb_rpmsg_proc_dev *lbrp
+                , struct rpmsg_ns_msg *msg);
+bool lbrp_channel_exists(
+                struct device *parent
+                , struct rpmsg_channel_info *chinfo);
+static void lbrp_rpmsg_release_device(struct device *dev);
+static struct rpmsg_device *lbrp_create_channel(
+                struct lb_rpmsg_proc_dev *lbrp
+                , struct rpmsg_channel_info *chinfo);
+struct rpmsg_announcement_entry *__lbrp_remote_announcement_pop(
+	            struct lb_rpmsg_proc_dev *lbrp);
+void __lbrp_remote_announcement_destroy(struct rpmsg_announcement_entry *entry);
+static ssize_t announcements_show(
+		        struct device *dev, struct device_attribute *attr, char *buf);
+static int lbrp_rpmsg_announce(struct rpmsg_device *rpdev, uint32_t flags);
+static int lbrp_rpmsg_announce_create(struct rpmsg_device *rpdev);
+static int lbrp_rpmsg_announce_destroy(struct rpmsg_device *rpdev);
+static int lbrp_probe(struct device *dev);
+static int lbrp_remove_rpmsg_device(struct device *dev, void *data);
+static void lbrp_remove(struct device *dev);
 
 //-------------------------- HELPER MACROS ----------------------------------//
 
@@ -69,6 +158,7 @@ static int lbrp_rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src,
 	container_of(_lbrp_ch_dev_ptr, struct lbrp_rpmsg_channel_dev, rpdev)
 
 //----------------------------- STRUCTS -------------------------------------//
+
 
 // NOTE: here used only to simulate the size restrictions for the messages.
 //
@@ -131,14 +221,14 @@ struct __lbrp_remote_ept_msg {
 // @msgs_head the head of the incoming messages list
 // @msgs_lock the incoming messages list lock
 // @sysfs_attr sysfs attribute, also contains the file name and file mode
-// @service service to which the ept belongs.
+// @service ptr to service to which the ept belongs.
 struct __lbrp_remote_ept {
     uint32_t addr;
 	struct list_head list_anchor;
 	struct list_head rx_msgs_head;
 	struct mutex rx_msgs_lock;
     struct attribute sysfs_attr;
-	struct __lbrp_remote_service service;
+	struct __lbrp_remote_service *service;
 };
  
 // represents the remote service
@@ -252,12 +342,12 @@ struct lbrp_rpmsg_channel_dev {
 // Devices structure:
 //
 //                            lbproc device
-//                            /    |     \
-//                           /     |      \
-//                          /      |       \
-//                         /       |        \
-//                        /        |         \
-//                       /         |          \
+//                            *    *     *
+//                           *     *      *
+//                          *      *       *
+//                         *       *        *
+//                        *        *         *
+//                       *         *          *
 //                   ch 1         ch 2   ...   ch N
 //             (child dev)    (child dev)   (child dev)
 //             (rpmsg dev)    (rpmsg dev)   (rpmsg dev)
@@ -274,7 +364,7 @@ const struct sysfs_ops __lbrp_service_sysfs_ops = {
 };
 
 // defines the remote service object type
-static const struct kobj_type remote_service_object_type {
+static const struct kobj_type remote_service_object_type = {
         .release = &__lbrp_remove_remote_service_refcnt0
         , .sysfs_ops = &__lbrp_service_sysfs_ops,
 };
@@ -389,8 +479,8 @@ free_ept:
 // If endpoint ref counter reaches 0 it will surely also delete it.
 // @lbrp our main "remote" proc device.
 // @ept endpoint to close
-static void
-__rpmsg_remove_ept(struct lb_rpmsg_proc_dev *lbrp, struct rpmsg_endpoint *ept)
+static void __rpmsg_remove_ept(struct lb_rpmsg_proc_dev *lbrp
+                , struct rpmsg_endpoint *ept)
 {
 	mutex_lock(&lbrp->endpoints_lock);
 	idr_remove(&lbrp->endpoints, ept->addr);
@@ -845,7 +935,10 @@ void __lbrp_remove_remote_ept(
     mutex_lock(&ept->rx_msgs_lock);
 
     struct __lbrp_remote_ept_msg *msg;
-    while (msg = list_first_entry_or_null(&ept->rx_msgs_head)) {
+    while (msg = list_first_entry_or_null(
+                        &ept->rx_msgs_head
+                        , struct __lbrp_remote_ept_msg
+                        , list_anchor)) {
         list_del(&msg->list_anchor);
         
         __lbrp_remote_ept_destroy_rx_msg(msg);
@@ -1253,7 +1346,10 @@ void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
     // when endpoints are destroyed alreay.
 
     mutex_lock(&service->epts_lock);
-    struct __lbrp_remote_ept *ept = list_first_entry_or_null(&service->epts_head);
+    struct __lbrp_remote_ept *ept = list_first_entry_or_null(
+                                                &service->epts_head
+                                                , struct __lbrp_remote_ept
+                                                , list_anchor);
     if (ept) {
         dev_err(lbrp->dev, "Service destroyed while there were endpoints.")
     }
@@ -1405,7 +1501,7 @@ static struct rpmsg_device *lbrp_create_channel(
 //
 // RETURNS:
 //      !NULL: the first announcement
-struct rpmsg_announcement_entry *entry __lbrp_remote_announcement_pop(
+struct rpmsg_announcement_entry *__lbrp_remote_announcement_pop(
 	        struct lb_rpmsg_proc_dev *lbrp)
 {
     mutex_lock(&lbrp->rpmsg_announcements_lock);
@@ -1559,7 +1655,10 @@ static void lbrp_remove(struct device *dev)
     //      and all local services which were created to match them.
     mutex_lock(&service->epts_lock);
     struct __lbrp_remote_ept *ept = NULL;
-    while (ept = list_first_entry_or_null(&service->epts_head)) {
+    while (ept = list_first_entry_or_null(
+                        &service->epts_head
+                        , struct __lbrp_remote_ept
+                        , list_anchor)) {
         __lbrp_remove_remote_ept(service, ept->addr);
     }
     mutex_unlock(&service->epts_lock);
