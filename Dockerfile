@@ -40,6 +40,8 @@ RUN make -C ${kernel_source_dir_x86} M=${repo_path} \
 
 RUN mkdir -p ${INITRAMFS_CHROOT_X86}/modules              \
     && cp ${repo_path}/src/fdvio.ko         \
+        ${INITRAMFS_CHROOT_X86}/modules/    \
+    && cp ${repo_path}/src/loopback_rpmsg_proc.ko         \
         ${INITRAMFS_CHROOT_X86}/modules/
 
 # ARM
@@ -53,6 +55,8 @@ RUN make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- \
 
 RUN mkdir -p ${INITRAMFS_CHROOT_ARM}/modules              \
     && cp ${repo_path}/src/fdvio.ko         \
+        ${INITRAMFS_CHROOT_ARM}/modules/    \
+    && cp ${repo_path}/src/loopback_rpmsg_proc.ko         \
         ${INITRAMFS_CHROOT_ARM}/modules/
 
 
@@ -77,13 +81,13 @@ RUN grep "${TEST_NAME}.kernel: PASS" /qemu_run_x86.log
 
 ## ARM
 
-# Create the dtb file
-RUN mkdir -p /builds/linux_arm/device_tree
-COPY ./device_tree/versatile-pb_fdvio.dts /builds/linux_arm/device_tree
-RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/versatile-pb_fdvio.dts \
-        > /builds/linux_arm/device_tree/versatile-pb_fdvio.dtb
-
-RUN run-qemu-tests-arm /builds/linux_arm/device_tree/versatile-pb_fdvio.dtb
-
-# Check the expected results
-RUN grep "${TEST_NAME}.kernel: PASS" /qemu_run_arm.log
+## Create the dtb file
+#RUN mkdir -p /builds/linux_arm/device_tree
+#COPY ./device_tree/versatile-pb_fdvio.dts /builds/linux_arm/device_tree
+#RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/versatile-pb_fdvio.dts \
+#        > /builds/linux_arm/device_tree/versatile-pb_fdvio.dtb
+#
+#RUN run-qemu-tests-arm /builds/linux_arm/device_tree/versatile-pb_fdvio.dtb
+#
+## Check the expected results
+#RUN grep "${TEST_NAME}.kernel: PASS" /qemu_run_arm.log

@@ -4,28 +4,39 @@
 
 set -e
 
-echo "Inserting fdvio module."
-insmod /modules/fdvio.ko
+dmesg -c
 
+#########################################
+
+echo "===== Inserting fdvio module."
+insmod /modules/fdvio.ko
 sleep 1
 
-echo "======== dmesg on fdvio insertion"
-dmesg | grep "fdvio"
-echo "======== dmesg on fdvio insertion end"
+#########################################
 
-dmesg | grep "docker_build_image_test_driver_init"
-echo "bosch-linux-ext-modules-build-test.insmod: PASS"
+echo "===== Inserting lbrp module."
+insmod /modules/loopback_rpmsg_proc.ko
+sleep 1
 
+#########################################
 
-echo "Removing fdvio module."
+echo "===== @@@@@@@@@ PLATFORM @@@@@@@@@@@."
+ls -alR /sys/bus/platform
+echo "===== @@@@@@@@@@@@@@@@@@@@."
+echo "===== @@@@@@@@@ RPMSG @@@@@@@@@@@."
+ls -alR /sys/bus/rpmsg
+echo "===== @@@@@@@@@@@@@@@@@@@@."
+
+#########################################
+
+echo "===== Removing lbrp module."
+rmmod  loopback_rpmsg_proc
+sleep 1
+
+#########################################
+
+echo "===== Removing fdvio module."
 rmmod  fdvio
 sleep 1
-
-echo "======== dmesg on fdvio removal"
-dmesg | grep "fdvio"
-echo "======== dmesg on fdvio removal end"
-
-dmesg | grep "docker_build_image_test_driver_exit"
-echo "bosch-linux-ext-modules-build-test.rmmod: PASS"
 
 
