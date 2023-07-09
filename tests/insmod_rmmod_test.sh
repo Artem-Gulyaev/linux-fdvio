@@ -20,12 +20,32 @@ sleep 1
 
 #########################################
 
-echo "===== @@@@@@@@@ PLATFORM @@@@@@@@@@@."
-ls -alR /sys/bus/platform
+echo ""
+echo ""
+echo "===== @@@@@@@@@ LBRP @@@@@@@@@@@."
+ls -alR /sys/devices/platform/lbrp.1
 echo "===== @@@@@@@@@@@@@@@@@@@@."
+sleep 1
+echo ""
 echo "===== @@@@@@@@@ RPMSG @@@@@@@@@@@."
 ls -alR /sys/bus/rpmsg
 echo "===== @@@@@@@@@@@@@@@@@@@@."
+echo ""
+echo ""
+sleep 1
+
+
+#########################################
+
+echo "===== LBRP: creating remote endpoint."
+echo -n "fdvio 1234" > /sys/devices/platform/lbrp.1/create_ept
+sleep 5
+
+echo "===== @@@@@@@@@ RPMSG @@@@@@@@@@@."
+ls -alR /sys/bus/rpmsg
+echo "===== @@@@@@@@@@@@@@@@@@@@."
+echo ""
+sleep 5
 
 #########################################
 

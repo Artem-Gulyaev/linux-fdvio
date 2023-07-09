@@ -560,6 +560,8 @@ static ssize_t create_ept_store(
         dev_err(dev, "Sorry, no lbrp dev referenced by the dev.");
         goto error;
     }
+    dev_info(lbrp->dev, "Creating remote endpoint %d for service '%s'"
+             " for lbrp: 0x%px.\n", remote_addr, service_name, lbrp);
 
     bool channel_existed = false;
     // NOTE: service will have refcount ++ after this call.
@@ -572,6 +574,8 @@ static ssize_t create_ept_store(
                 , service_name);
         goto error;
     }
+
+    dev_info(lbrp->dev, "Target service '%s': 0x%px.\n", service_name, rservice);
 
     struct __lbrp_remote_ept *ept = __lbrp_create_remote_ept(
                 rservice, remote_addr);
@@ -1217,13 +1221,13 @@ struct __lbrp_remote_service *__lbrp_get_remote_service(
 {
     mutex_lock(&lbrp->remote_services_lock);
     struct __lbrp_remote_service *rservice = NULL;
-    list_for_each_entry(rservice, &lbrp->remote_services, list_anchor) {
-        if (strncmp(name, rservice->name, sizeof(rservice->name)) == 0) {
+    struct __lbrp_remote_service *s = NULL;
+    list_for_each_entry(s, &lbrp->remote_services, list_anchor) {
+        if (strncmp(name, s->name, sizeof(s->name)) == 0) {
+            __lbrp_get_remote_service_by_ptr(s);
+            rservice = s;
             break;
         }
-    }
-    if (rservice) {
-        __lbrp_get_remote_service_by_ptr(rservice);
     }
     mutex_unlock(&lbrp->remote_services_lock);
     return rservice;
@@ -1262,8 +1266,6 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
             , char *name
             , bool *existed__out)
 {
-    dev_info(lbrp->dev, "Creating remote service: %s", name);
-
     // check if service is there already
     struct __lbrp_remote_service *rservice
                 = __lbrp_get_remote_service(lbrp, name);
@@ -1274,6 +1276,8 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
 
         return rservice;
     }
+
+    dev_info(lbrp->dev, "Creating remote service: %s", name);
 
     // need to create a new one
     rservice = kzalloc(sizeof(*rservice), GFP_KERNEL);
@@ -1308,6 +1312,9 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
     }
 
     mutex_unlock(&lbrp->remote_services_lock);
+
+    dev_info(lbrp->dev, "Remote service: %s has parent object: 0x%px", name
+             , rservice->kobj.parent);
 
     return rservice;
 }
@@ -1644,7 +1651,8 @@ static int lbrp_probe(struct platform_device *pdev)
     INIT_LIST_HEAD(&lbrp->remote_services);
 	mutex_init(&lbrp->remote_services_lock);
 
-	dev_info(lbrp->dev, "loopback rpmsg host is online\n");
+	dev_info(lbrp->dev, "loopback rpmsg host is online: lbrp: %px\n"
+             , dev_get_drvdata(&pdev->dev));
 
 	return 0;
 }
