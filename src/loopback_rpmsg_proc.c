@@ -158,6 +158,12 @@ static int lbrp_remove(struct platform_device *pdev);
 #define to_lbrp_rpmsg_channel_dev(_lbrp_ch_dev_ptr) \
 	container_of(_lbrp_ch_dev_ptr, struct lbrp_rpmsg_channel_dev, rpdev)
 
+#define LBRP_CHECK_DEVICE(msg, error_action)				\
+	if (IS_ERR_OR_NULL(lbrp)) {					\
+		pr_err("no device! "msg"\n");		\
+		error_action;						\
+	}
+
 //----------------------------- STRUCTS -------------------------------------//
 
 
@@ -410,7 +416,14 @@ static struct rpmsg_endpoint *lbrp_rpmsg_create_ept(
 		, void *priv
 		, struct rpmsg_channel_info chinfo)
 {
+    dev_info(&rpdev->dev, "lbrp: rq from rpmsg core: create local endpoint: "
+             " channel.src: %d, channel.dst: %d"
+             , chinfo.src, chinfo.dst);
+
 	struct lbrp_rpmsg_channel_dev *lbrp_ch = to_lbrp_rpmsg_channel_dev(rpdev);
+
+    dev_info(&rpdev->dev, "lbrp_channel_dev: %px\n", lbrp_ch);
+    dev_info(&rpdev->dev, "lbrp_channel_dev: lbrp device: %px\n", lbrp_ch->lbrp_dev);
 
 	return __lbrp_rpmsg_create_ept(lbrp_ch->lbrp_dev, rpdev, cb
                                    , priv, chinfo.src);
@@ -430,6 +443,8 @@ static struct rpmsg_endpoint *__lbrp_rpmsg_create_ept(
 				, void *priv
                 , u32 local_addr)
 {
+    LBRP_CHECK_DEVICE("Can't create endpoint.", return NULL);
+
 	struct device *dev = rpdev ? &rpdev->dev : lbrp->dev;
 
 	struct rpmsg_endpoint *ept = NULL;
@@ -1483,6 +1498,11 @@ static struct rpmsg_device *lbrp_create_channel(
             struct lb_rpmsg_proc_dev *lbrp
             , struct rpmsg_channel_info *chinfo)
 {
+    LBRP_CHECK_DEVICE("Can't create local rpmsg channel.", return NULL);
+
+    dev_info(lbrp->dev, "Creating local rpmsg channel: src: %d"
+             ", dst: %d\n", chinfo->src, chinfo->dst);
+
 	if (lbrp_channel_exists(lbrp->dev, chinfo)) {
 		dev_err(lbrp->dev, "channel %s:%x:%x already exists\n",
 				chinfo->name, chinfo->src, chinfo->dst);
@@ -1495,6 +1515,7 @@ static struct rpmsg_device *lbrp_create_channel(
         dev_err(lbrp->dev, "channel dev malloc failed.");
 		return NULL;
     }
+    new_ch->lbrp_dev = lbrp;
 
 	struct rpmsg_device *rpdev = &new_ch->rpdev;
 

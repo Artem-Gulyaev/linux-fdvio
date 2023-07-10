@@ -934,6 +934,10 @@ int __fdvio_accept_data(struct fdvio_dev* fdvio
 // THREADING: on the same instance init can be called **only**
 //    * if it is a brand newly created instance (no work was done on it yet),
 //    * or if this instance was properly closed by __fdvio_close(...) before.
+//
+// RETURNS:
+//      0: all fine
+//      !0: negated error code (failure)
 int __fdvio_init(void __kernel *device)
 {
     CAST_DEVICE_TO_FDVIO;
@@ -1038,12 +1042,10 @@ EXPORT_SYMBOL(full_duplex_fdvio_iface);
 __maybe_unused
 static int fdvio_probe(struct rpmsg_device *rpdev)
 {
+	pr_info("fdvio: probing of fdvio device started.\n");
+
 	if (IS_ERR_OR_NULL(rpdev)) {
 		pr_err("Broken pointer to the rpmsg_device in %s\n", __func__);
-		return -ENODEV;
-	}
-	if (IS_ERR_OR_NULL(&rpdev->dev)) {
-		pr_err("Broken pointer to the rpmsg_device->dev in %s\n", __func__);
 		return -ENODEV;
 	}
 	if (IS_ERR_OR_NULL(rpdev->ept)) {
@@ -1069,9 +1071,8 @@ static int fdvio_probe(struct rpmsg_device *rpdev)
 
 	res = __fdvio_init(fdvio);
 	fdvio_info("Fdvio device created: %px", fdvio);
-	if (!res) {
-		dev_err(&rpdev->dev, "fdvio: initialization failed: errno: %d\n"
-				, res);
+	if (res) {
+		dev_err(&rpdev->dev, "fdvio: initialization failed: errno: %d\n", res);
 		goto fdvio_init_failed;
 	}
 
@@ -1139,7 +1140,6 @@ static struct rpmsg_device_id fdvio_id_table[] = {
 #endif
     }
 	, { }
-	,
 };
 MODULE_DEVICE_TABLE(rpmsg, fdvio_id_table);
 
