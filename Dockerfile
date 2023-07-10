@@ -25,6 +25,10 @@ RUN make_apply_linux_arm
 ENV repo_path=/repos/linux-fdvio
 RUN rm -rf ${repo_path} && mkdir -p ${repo_path}
 
+# TODO: MOVE THIS TO KERNEL MODULES BASE IMAGE
+
+RUN apt-get install gdb libncurses-dev
+
 # add only for the container, not for an image
 WORKDIR ${repo_path}
 COPY . .
