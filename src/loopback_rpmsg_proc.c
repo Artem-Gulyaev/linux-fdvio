@@ -789,8 +789,8 @@ static ssize_t __lbrp_service_ept_attr_store(
 		return -EINVAL;
 	}
 
-	dev_dbg(lbrp->dev, "From: 0x%x, To: 0x%x, Len: %d, (userspace len: %zu)\n"
-			, rept->addr, dst, msg_len, count);
+	dev_info(lbrp->dev, "From: 0x%x, To: 0x%x, Len: %d, (userspace len: %zu)\n"
+		 	 , rept->addr, dst, msg_len, count);
 #if defined(CONFIG_DYNAMIC_DEBUG)
 	dynamic_hex_dump("lbrp RX: ", DUMP_PREFIX_NONE, 16, 1
 			 		 , msg_data, msg_len, true);

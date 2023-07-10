@@ -44,14 +44,21 @@ ls -alR /sys/devices/platform/lbrp.1
 echo "===== @@@@@@@@@@@@@@@@@@@@."
 echo ""
 
+#########################################
+
 echo "===== LBRP: writing data to remote endpoint."
-echo -n "1122aaabbb" > /sys/devices/platform/lbrp.1/fdvio_rpmsg/ept_5432
+echo -n -e "\x00\x40\x00\x00aaabbb" > /sys/devices/platform/lbrp.1/fdvio_rpmsg/ept_5432
 
 #########################################
 
 echo "===== Inserting fdvio module."
 insmod /modules/fdvio.ko
 sleep 1
+
+#########################################
+
+echo "===== LBRP: writing data to remote endpoint AGAIN."
+echo -n -e "\x00\x04\x00\x00aaabbb" > /sys/devices/platform/lbrp.1/fdvio_rpmsg/ept_5432
 
 #########################################
 

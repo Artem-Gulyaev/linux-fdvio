@@ -120,10 +120,11 @@
 		action;                                   \
 	}
 
+// Bool value, true, when switch occured
 #define FDVIO_SWITCH_STRICT(from, to)                          \
 	(atomic_cmpxchg(&fdvio->state,                             \
-					FDVIO_STATE_##to,                          \
-					FDVIO_STATE_##from) != FDVIO_STATE_##to)
+					FDVIO_STATE_##from,                        \
+					FDVIO_STATE_##to) == FDVIO_STATE_##from)
 #define FDVIO_SWITCH_FORCED(to)                          \
 	atomic_set(&fdvio->state, FDVIO_STATE_##to)
 #define FDVIO_STATE_IS(st_name)                          \
@@ -485,8 +486,8 @@ int fdvio_stop(void __kernel *device)
 			return -EBUSY;
 		}
 		if (st == FDVIO_STATE_INITIALIZED) {
-			fdvio_warn("Already stopped.");
-			return -EBUSY;
+			fdvio_info("Already stopped.");
+			return 0;
 		}
 
 		if (FDVIO_SWITCH_STRICT(XFER_TX, SHUTTING_DOWN)
@@ -779,6 +780,9 @@ int __fdvio_rpmsg_rcv_cb(struct rpmsg_device *rpdev, void *msg, int msg_len
 	FDVIO_CHECK_PTR(msg, return -EINVAL);
 	FDVIO_CHECK_PTR(rpdev->ept, return -EINVAL);
 
+	fdvio_trace("got the data from the other side: src: %d, msg len: %d"
+                , source, msg_len);
+
 	// trying to initialize the new xfer, send out our data and start timer.
 	int res = __fdvio_goto_xfer(fdvio, NULL);
 
@@ -983,17 +987,22 @@ int __fdvio_close(void __kernel *device)
     FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
 	FDVIO_CHECK_PTR(fdvio->rpdev, return -ENODEV);
 
-	fdvio_info("closing dev: %px", device);
+	fdvio_info("closing dev: %px, dev state: %d", device, FDVIO_STATE());
 
-	int32_t st = FDVIO_STATE();
-	if (st != FDVIO_STATE_INITIALIZED) {
-		fdvio_err("Can't close dev: dev is not in INITIALIZED state.");
+    int res = fdvio_stop(device);
+    if (res) {
+		fdvio_err("Can't close dev: failed to stop the device,"
+                  " error: %d", res);
+		return -EFAULT;
+    }
+
+    if (!FDVIO_SWITCH_STRICT(INITIALIZED, COLD)
+            || !FDVIO_SWITCH_STRICT(COLD, COLD)) {
+		fdvio_err("Can't close dev: INITIALIZED -> COLD failed");
 		return -EFAULT;
 	}
 
-	(void)FDVIO_SWITCH_STRICT(INITIALIZED, COLD);
 	fdvio->magic = 0;
-
 	fdvio_info("closed dev: %px", device);
 
 	return 0;
@@ -1110,7 +1119,7 @@ static void fdvio_remove(struct rpmsg_device *rpdev)
 	} else {
 		res = __fdvio_close(fdvio);
 
-		if (!res) {
+		if (res) {
 			dev_err(&rpdev->dev, "fdvio: __fdvio_close failed, errno: %d\n", res);
 		}
 	}
