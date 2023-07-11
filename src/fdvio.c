@@ -32,6 +32,7 @@
 #include <linux/delay.h>
 #include <linux/rpmsg.h>
 #include <linux/proc_fs.h>
+#include <linux/platform_device.h>
 
 #include <linux/full_duplex_interface.h>
 
@@ -191,6 +192,7 @@
     #define FDVIO_ERROR_SILENCE_TIME_MSEC 50
 #endif
 
+#define FDVIO_DEV_NAME_MAX_LEN 80;
 
 // The cold-and-dark state of the driver - before initialization was even
 // carried out.
@@ -264,6 +266,20 @@
 // No current xfer provided
 #define FDVIO_ERROR_NO_XFER 9
 
+// The platform device we register on creation to make it working
+// with ICCom. It works only as a formal adapter to the ICCom expectations.
+// NOTE: later this to be polished.
+//
+// @pdev the platform device
+// @fdtd the full duplex transport device.
+//      * .dev points to fdvio
+//		NOTE: the platform driver data points to the @tdtd.
+struct fdvio_fdtd_dev {
+	struct platform_device *pdev;
+
+	// drv_data points to this struct.
+	struct full_duplex_device fdtd;
+};
 
 // The device itself
 // @magic the field where the FDVIO_MAGIC should be written upon the
@@ -280,6 +296,7 @@
 //      it is enabled every time when we start waiting for the
 //      other side data, and is disabled every time we finish
 //      the waiting.
+// @ff_dev the device-adapter to ICCom
 struct fdvio_dev {
 	uint32_t magic;
 	atomic_t state; 
@@ -293,8 +310,9 @@ struct fdvio_dev {
 	bool delayed_xfer_request;
 
 	struct timer_list wait_timeout_timer;
-};
 
+	struct fdvio_fdtd_dev ff_dev;
+};
 
 /*---------------------- PRE DECLARATIONS ----------------------------*/
 
@@ -926,6 +944,91 @@ int __fdvio_accept_data(struct fdvio_dev* fdvio
 	return fdvio->xfer->id;
 }
 
+/*------------ FDVIO FULL DUPLEX TRANSPORT PLATFORM DEVICE ---------*/
+
+// Inits adapter platform device.
+// RETURNS:
+//		0: all fine
+//		!0: negated error code
+static int __fdvio_ff_dev_init(struct fdvio_dev* fdvio)
+{
+	fdvio_info("starting initialization of platform adapter device: %px", fdvio);
+
+	fdvio->ff_dev.fdtd.dev = fdvio;
+	fdvio->ff_dev.fdtd.iface = full_duplex_fdvio_iface();
+
+	fdvio->ff_dev.pdev = platform_device_register_simple("fdvio_pd", 1, NULL, 0);
+
+	if (IS_ERR_OR_NULL(fdvio->ff_dev.pdev)) {
+		fdvio_err("could not create the platform device for fdvio");
+		goto pd_register_failed;
+	}
+
+	dev_set_drvdata(&fdvio->ff_dev.pdev->dev, &fdvio->ff_dev.fdtd);
+	
+	fdvio_info("platform adapter device initialized: %px", fdvio);
+
+	return 0;
+
+pd_register_failed:
+	dev_set_drvdata(&fdvio->ff_dev.pdev->dev, NULL);
+	fdvio->ff_dev.fdtd.iface = NULL;
+	fdvio->ff_dev.fdtd.dev = NULL;
+	return -EFAULT;
+}
+
+// Just closes the platform device (adapter toward ICCom).
+static int __fdvio_ff_dev_close(struct fdvio_dev* fdvio)
+{
+	fdvio_info("platform adapter device closing: %px", fdvio);
+
+	platform_device_unregister(fdvio->ff_dev.pdev);
+	fdvio->ff_dev.pdev = NULL;
+	dev_set_drvdata(&fdvio->ff_dev.pdev->dev, NULL);
+	fdvio->ff_dev.fdtd.iface = NULL;
+	fdvio->ff_dev.fdtd.dev = NULL;
+
+	fdvio_info("platform adapter device closed: %px", fdvio);
+
+	return 0;
+}
+
+// Only formal thing.
+static int fdvio_ff_dev_probe(struct platform_device *fdvio)
+{
+	return 0;
+}
+
+// Only formal thing.
+static int fdvio_ff_dev_remove(struct platform_device *fdvio)
+{
+	return 0;
+}
+
+// The ICCom driver compatible definition for
+// matching the driver to devices available
+//
+// @compatible name of compatible driver
+struct of_device_id fdvio_pd_driver_id[] = {
+	{
+		.compatible = "fdvio_pd",
+	}
+};
+
+// Fdvio platform device driver descriptor.
+struct platform_driver fdvio_pd_driver = {
+	.probe = fdvio_ff_dev_probe,
+	.remove = fdvio_ff_dev_remove,
+	.driver = {
+		.owner = THIS_MODULE,
+		.name = "fdvio_pd",
+		.of_match_table = fdvio_pd_driver_id,
+		.dev_groups = NULL
+	}
+};
+
+/*---------------------- FDVIO INIT / CLOSE ------------------------*/
+
 // Short: initializes the fdvio device and prepares it for work.
 // But it doesn't start it (cause no default xfer is provided).
 // Is to be called by kernel (in probe) when corresponding device is
@@ -953,6 +1056,7 @@ int __fdvio_init(void __kernel *device)
 	if (fdvio->magic == FDVIO_MAGIC) {
 		fdvio_warn("Note, the magic already matches.");
 	};
+
 	fdvio->magic = FDVIO_MAGIC;
 	FDVIO_SWITCH_FORCED(COLD);
 
@@ -961,9 +1065,15 @@ int __fdvio_init(void __kernel *device)
 	fdvio->next_xfer_id = 1;
 	fdvio->delayed_xfer_request = false;
 
+	// We create a platform device, which iccom will be bound to.
+    // NOTE: this device is just an adapter to provide the iccom
+    // formal device to bind to and provide the data.
+
 	// timeout timer
 	timer_setup(&fdvio->wait_timeout_timer
 			, __fdvio_other_side_wait_timeout_handler, 0);
+
+	__fdvio_ff_dev_init(fdvio);
 
 	(void)FDVIO_SWITCH_STRICT(COLD, INITIALIZED);
 
@@ -988,6 +1098,8 @@ int __fdvio_close(void __kernel *device)
 	FDVIO_CHECK_PTR(fdvio->rpdev, return -ENODEV);
 
 	fdvio_info("closing dev: %px, dev state: %d", device, FDVIO_STATE());
+
+	__fdvio_ff_dev_close(fdvio);
 
     int res = fdvio_stop(device);
     if (res) {
@@ -1131,8 +1243,6 @@ static void fdvio_remove(struct rpmsg_device *rpdev)
 			, fdvio, res);
 }
 
-/* --------------------- MODULE HOUSEKEEPING SECTION ------------------- */
-
 // NOTE: the other side announces the available channels, using the
 //  names as identifiers, and those names are matched via the names
 //  in this table.
@@ -1143,7 +1253,7 @@ static void fdvio_remove(struct rpmsg_device *rpdev)
 //  The list of compatible RPMSG channels (by their names, which also
 //  used on the other side to announce them):
 static struct rpmsg_device_id fdvio_id_table[] = {
-	{ .name = "fdvio_rpmsg"
+	{ .name = "fdvio"
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
         , .driver_data = 0
 #endif
@@ -1161,7 +1271,46 @@ static struct rpmsg_driver fdvio_driver = {
 	.callback       = __fdvio_rpmsg_rcv_cb,
 	.remove         = fdvio_remove,
 };
-module_rpmsg_driver(fdvio_driver);
+
+/* --------------------- MODULE HOUSEKEEPING SECTION ------------------- */
+
+static int __init fdvio_module_init(void)
+{
+	pr_info("loading fdvio module...");
+
+	int ret = register_rpmsg_driver(&fdvio_driver);
+	if (ret != 0) {
+		pr_err("fdvio main driver register failed: %d", ret);
+		return ret;
+	}
+
+	ret = platform_driver_register(&fdvio_pd_driver);
+	if (ret != 0) {
+		pr_err("fdvio platform driver register failed: %d", ret);
+		goto platform_drv_failed;
+	}
+
+	pr_info("fdvio module loaded.");
+
+	return 0;
+
+platform_drv_failed:
+	unregister_rpmsg_driver(&fdvio_driver);
+	return ret;
+}
+
+static void __exit fdvio_module_exit(void)
+{
+	pr_info("unloading fdvio module...");
+
+	platform_driver_unregister(&fdvio_pd_driver);
+	unregister_rpmsg_driver(&fdvio_driver);
+
+	pr_info("sucessfully unloaded fdvio module.");
+}
+
+module_init(fdvio_module_init);
+module_exit(fdvio_module_exit);
 
 MODULE_DESCRIPTION("Full duplex VirtIO (rpmsg-based) device");
 MODULE_AUTHOR("Artem Gulyaev <Artem.Gulyaev@bosch.com>");

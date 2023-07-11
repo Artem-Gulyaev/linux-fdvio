@@ -14,40 +14,34 @@ sleep 1
 
 #########################################
 
-echo ""
-echo ""
-echo "===== @@@@@@@@@ LBRP @@@@@@@@@@@."
-ls -alR /sys/devices/platform/lbrp.1
-echo "===== @@@@@@@@@@@@@@@@@@@@."
-sleep 1
-echo ""
-echo "===== @@@@@@@@@ RPMSG @@@@@@@@@@@."
-ls -alR /sys/bus/rpmsg
-echo "===== @@@@@@@@@@@@@@@@@@@@."
-echo ""
-echo ""
+echo "===== LBRP"
+ls -aR /sys/devices/platform/lbrp.1
+
+echo "===== RPMSG"
+ls -aR /sys/bus/rpmsg
+
+echo "===== PLATFORM DEV"
+ls -aR /sys/devices/platform
+
 sleep 1
 
 
-#########################################
 
 echo "===== LBRP: creating remote endpoint."
-echo -n "fdvio_rpmsg 5432" > /sys/devices/platform/lbrp.1/create_ept
+echo -n "fdvio 5432" > /sys/devices/platform/lbrp.1/create_ept
 
-echo "===== @@@@@@@@@ RPMSG @@@@@@@@@@@."
-ls -alR /sys/bus/rpmsg
-echo "===== @@@@@@@@@@@@@@@@@@@@."
-echo ""
+echo "===== RPMSG"
+ls -aR /sys/bus/rpmsg
 
-echo "===== @@@@@@@@@ LBRP DEV @@@@@@@@@@@."
-ls -alR /sys/devices/platform/lbrp.1
-echo "===== @@@@@@@@@@@@@@@@@@@@."
-echo ""
+echo "===== PLATFORM DEV"
+ls -aR /sys/devices/platform
 
-#########################################
+echo "===== LBRP DEV"
+ls -aR /sys/devices/platform/lbrp.1
+
 
 echo "===== LBRP: writing data to remote endpoint."
-echo -n -e "\x00\x40\x00\x00aaabbb" > /sys/devices/platform/lbrp.1/fdvio_rpmsg/ept_5432
+echo -n -e "\x00\x40\x00\x00aaabbb" > /sys/devices/platform/lbrp.1/fdvio/ept_5432
 
 #########################################
 
@@ -55,10 +49,16 @@ echo "===== Inserting fdvio module."
 insmod /modules/fdvio.ko
 sleep 1
 
+echo "===== PLATFORM DEV"
+ls -aR /sys/devices/platform
+
+echo "===== LBRP DEV"
+ls -aR /sys/devices/platform/lbrp.1
+
 #########################################
 
 echo "===== LBRP: writing data to remote endpoint AGAIN."
-echo -n -e "\x00\x04\x00\x00aaabbb" > /sys/devices/platform/lbrp.1/fdvio_rpmsg/ept_5432
+echo -n -e "\x00\x04\x00\x00aaabbb" > /sys/devices/platform/lbrp.1/fdvio/ept_5432
 
 #########################################
 
