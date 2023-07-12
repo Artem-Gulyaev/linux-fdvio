@@ -103,12 +103,13 @@ def lbrp_ensure_no_remote_ept(service_name, addr):
                         + ept_file);
 
 # Sends the data from "remote" service to the local service
+# @data bytearray or comprable
 # EXAMPLE:
 #       to send the "qwerty" string to 0x400 endpoint:
 #       echo -n -e "\x00\x04\x00\x00qwerty" > SRC_ENDPOINT_FILE
 def lbrp_send_data(service_name, src_addr, dst_addr, data):
 
-    print("Sending data  %s:%d -> %d:  %s"
+    print("->  %s:%d => %d:  %s"
           % (service_name, src_addr, dst_addr
              , ''.join('{:02x}'.format(x) for x in data)))
 
@@ -128,15 +129,18 @@ def lbrp_send_data(service_name, src_addr, dst_addr, data):
 #       (src_addr, data)
 def lbrp_read_data(service_name, dst_addr):
 
-    print("Reading the data at %s:%d" % (service_name, src_addr))
+    print("Reading the data at %s:%d" % (service_name, dst_addr))
 
     ept_file = ("/sys/devices/platform/" + lbrp_dev_name()
                 + "/" + str(service_name)
                 + "/ept_" + str(dst_addr))
 
-    raw_data = read_sysfs_file(ept_file, None)
+    raw_data = fdvio_common.read_sysfs_file(ept_file, None, True)
 
     ADDR_SIZE = 4
+
+    if (len(raw_data) == 0):
+        return (None, bytearray()) 
 
     if (len(raw_data) < ADDR_SIZE):
         raise RuntimeError("Lbrp data read error: \n"
@@ -605,9 +609,8 @@ def test_fdvio_dev_bind_to_iccom(params, get_test_info=False):
             return { "test_description": (
                             "insmod lbrp, insmod fdvio, insmod iccom"
                             " create remote fdvio ept (creates the fdvio device)"
-                            ", insmod fdvio, check"
-                            " that fdvio and fdvio_pd devices are"
-                            " created.")
+                            ", check that fdvio_pd devices is created,"
+                            " bind it to iccom, close everything.")
                      , "test_id": "fdvio.fdvio_dev_bind_to_iccom" }
 
         remote_ept_addr = 5432
@@ -641,14 +644,109 @@ def test_fdvio_dev_bind_to_iccom(params, get_test_info=False):
         attach_transport_device_to_iccom_device(fdvio_platform_dev_name
                                                 , iccom_dev, None)
 
-        create_iccom_sysfs_channel(iccom_dev, 1, None)
-
         delete_iccom_device(iccom_dev, None)
 
         remove_iccom_module()
         remove_fdvio_module()
         remove_lbrp_module()
 
+
+def test_iccom_fdvio_lbrp_data_path(params, get_test_info=False):
+
+        if (get_test_info):
+            return { "test_description": (
+                            "insmod lbrp, insmod fdvio, insmod iccom"
+                            " create remote fdvio ept (creates the fdvio device)"
+                            ", bind iccom to fdvio platform device,"
+                            " , create iccom sysfs channel"
+                            " , write to this channel, check data pops in lbrp.")
+                     , "test_id": "fdvio.iccom_fdvio_lbrp_data_path" }
+
+        remote_ept_addr = 5432
+        service_name = "fdvio"
+
+        # The device created by the rpmsg, to which the fdvio driver gets
+        # attached.
+        rpmsg_fdvio_dev_name = (lbrp_dev_name() + "." + service_name + ".-1."
+                                + str(remote_ept_addr))
+        rpmsg_fdvio_dev_path = "/sys/bus/rpmsg/devices/" + rpmsg_fdvio_dev_name
+
+        fdvio_platform_dev_name = "fdvio_pd.1"
+        fdvio_platform_dev_path = ("/sys/devices/platform/"
+                                   + fdvio_platform_dev_name)
+        iccom_dev = "iccom.0"
+        iccom_ch = 1
+
+        # Action!
+
+        insert_lbrp_module()
+        insert_fdvio_module()
+        insert_iccom_module()
+
+        lbrp_create_remote_ept(service_name, remote_ept_addr)
+
+        create_iccom_device(None)
+        attach_transport_device_to_iccom_device(fdvio_platform_dev_name
+                                                , iccom_dev, None)
+
+        create_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+        set_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+
+        # DATA EXCHANGE CYCLE
+
+        # this thing we will know only when iccom sends us something
+        iccom_addr = None
+        rcv_data = None
+
+        # Data frame
+        print("== Data frame:")
+        lbrp2iccom_data = iccom_package(1, iccom_packet(iccom_ch
+                                , "hello to iccom!".encode("utf-8"), True))
+        iccom2lbrp_data = iccom_package(1, bytearray())
+
+        iccom_send(iccom_dev, iccom_ch, "hello to lbrp!", None)
+        sleep(0.4)
+        iccom_addr, rcv_data = lbrp_read_data(service_name, remote_ept_addr)
+
+        print("<- real:      %s" % (rcv_data.hex(),))
+        print("<- expected:  %s" % (iccom2lbrp_data.hex(),))
+        if (rcv_data != iccom2lbrp_data):
+            raise Exception("Received unexpected data from ICCom.")
+
+        lbrp_send_data(service_name, remote_ept_addr, iccom_addr, lbrp2iccom_data)
+        sleep(0.4)
+
+        # Ack frame
+        print("== Ack frame:")
+        lbrp2iccom_data = iccom_ack_package()
+        iccom2lbrp_data = iccom_ack_package()
+
+        iccom_addr, rcv_data = lbrp_read_data(service_name, remote_ept_addr)
+
+        print("<- real:      %s" % (rcv_data.hex(),))
+        print("<- expected:  %s" % (iccom2lbrp_data.hex(),))
+        if (rcv_data != iccom2lbrp_data):
+            raise Exception("\nData from iccom: %s\n"
+                            "Expected data:   %s", (rcv_data.hex() ,iccom2lbrp_data.hex()));
+
+        lbrp_send_data(service_name, remote_ept_addr, iccom_addr, lbrp2iccom_data)
+        sleep(0.4)
+
+        # Check if data popped on iccom side
+        str2iccom_expected = "hello to iccom!"
+        str2iccom_real = iccom_read(iccom_dev, iccom_ch, None)
+
+        print("On ICCom side: <- real:      %s" % (str2iccom_real,))
+        print("On ICCom side: <- expected:  %s" % (str2iccom_expected,))
+
+        if str2iccom_real != str2iccom_expected:
+            raise Exception("Iccom received distorted data: %s" % (str2iccom_real,))
+
+        delete_iccom_device(iccom_dev, None)
+
+        remove_iccom_module()
+        remove_fdvio_module()
+        remove_lbrp_module()
 
 #--------------------------- MAIN ------------------------------------#
 
@@ -659,6 +757,7 @@ def run_tests():
         fdvio_test(test_lbrp_write_to_ept_with_no_receiver, {})
         fdvio_test(test_fdvio_dev_creation_1, {})
         fdvio_test(test_fdvio_dev_bind_to_iccom, {})
+        fdvio_test(test_iccom_fdvio_lbrp_data_path, {})
 
 if __name__ == '__main__':
 

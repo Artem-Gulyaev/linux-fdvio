@@ -88,7 +88,9 @@ RUN echo "************** OVERALL RESULT ******************" \
 		&& grep "fdvio.fdvio_dev_creation_1: PASS" /qemu_run_x86.log > /dev/null \
 			&& echo "fdvio.fdvio_dev_creation_1: \033[0;32mPASS\033[0m" \
 		&& grep "fdvio.fdvio_dev_bind_to_iccom: PASS" /qemu_run_x86.log > /dev/null \
-			&& echo "fdvio.fdvio_dev_bind_to_iccom: \033[0;32mPASS\033[0m"
+			&& echo "fdvio.fdvio_dev_bind_to_iccom: \033[0;32mPASS\033[0m" \
+		&& grep "fdvio.iccom_fdvio_lbrp_data_path: PASS" /qemu_run_x86.log > /dev/null \
+			&& echo "fdvio.iccom_fdvio_lbrp_data_path: \033[0;32mPASS\033[0m" \
         
 ## ARM
 

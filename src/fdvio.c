@@ -38,7 +38,7 @@
 
 // the level of debugging
 // 0 - no debug
-#define FDVIO_DEBUG_LEVEL 0
+#define FDVIO_DEBUG_LEVEL 1
 
 /* --------------------- UTILITIES SECTION ----------------------------- */
 
@@ -128,7 +128,7 @@
 
 // Bool value, true, when switch occured
 #define FDVIO_SWITCH_STRICT(from, to)                          \
-	(atomic_cmpxchg(&fdvio->state,                             \
+	(fdvio_trace(" -> "#to), atomic_cmpxchg(&fdvio->state,    \
 					FDVIO_STATE_##from,                        \
 					FDVIO_STATE_##to) == FDVIO_STATE_##from)
 #define FDVIO_SWITCH_FORCED(to)                          \
@@ -190,14 +190,19 @@
 
 // The timeout for waiting for the other side data after we have sent our.
 #ifndef FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC
-    #define FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 10
+    //#define FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 10
+	// FIXME: FOR PRODUCTION IT MUST BE 10 or comparable
+    #define FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 5000
 #endif
 // How much time we sleep ignoring all if error occured
 #ifndef FDVIO_ERROR_SILENCE_TIME_MSEC
     #define FDVIO_ERROR_SILENCE_TIME_MSEC 50
 #endif
 
-#define FDVIO_DEV_NAME_MAX_LEN 80;
+#define FDVIO_DEV_NAME_MAX_LEN 80
+
+// This guy is used if customer didn't provide its RX buffer
+#define FDVIO_OWN_RX_BUFFER_SIZE_BYTES 512
 
 // The cold-and-dark state of the driver - before initialization was even
 // carried out.
@@ -310,6 +315,8 @@ struct fdvio_dev {
 	struct platform_device *pdev;
 	// drv_data points to this struct.
 	struct full_duplex_device fdtd;
+
+	char own_rx_buf[FDVIO_OWN_RX_BUFFER_SIZE_BYTES];
 };
 
 /*---------------------- PRE DECLARATIONS ----------------------------*/
@@ -452,6 +459,9 @@ int fdvio_start(void __kernel *device
 
 	int res = __fdvio_accept_data(fdvio, initial_xfer);
 	if (res != 0) {
+		fdvio_err("failed to accept the initial data, xfer size: %zu"
+                  ", xfer tx data: %px, xfer rx buf: %px", initial_xfer->size_bytes
+                  , initial_xfer->data_tx, initial_xfer->data_rx_buf);
 		goto accept_data_failed;
 	}
 
@@ -565,6 +575,7 @@ int __fdvio_goto_xfer(
 	FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
 
 	if (!FDVIO_SWITCH_STRICT(IDLE, XFER_TX)) {
+		fdvio_trace("no switch, state: %d", FDVIO_STATE());
 		return -FDVIO_ERROR_NO_SWITCH;
 	}
 
@@ -581,6 +592,10 @@ int __fdvio_goto_xfer(
 	}
 
 	fdvio->delayed_xfer_request = false;
+
+	fdvio_trace("sending msg 0x%x -> 0x%x, data size %zu"
+				, fdvio->rpdev->src, fdvio->rpdev->dst
+				, fdvio->xfer->size_bytes);
 
 	res = rpmsg_send(fdvio->rpdev->ept, fdvio->xfer->data_tx
 				, fdvio->xfer->size_bytes);
@@ -817,10 +832,12 @@ int __fdvio_rpmsg_rcv_cb(struct rpmsg_device *rpdev, void *msg, int msg_len
 
 	// RX sequence here
 
+	fdvio_trace("waiting for XFER_RX state");
+
 	// wait for the XFER_RX state, which indicates
 	// that TX part of the sequence is done
 	while (true) {
-		if (FDVIO_STATE_IS(XFER_TX)) {
+		if (FDVIO_STATE_IS(XFER_RX)) {
 			break;
 		}
 		// the state drifted away, say due to error, or timeout
@@ -946,7 +963,18 @@ int __fdvio_accept_data(struct fdvio_dev* fdvio
 
 	fdvio->xfer->id = __fdvio_set_next_xfer_id(fdvio);
 
-	return fdvio->xfer->id;
+	// FIXME: workaround for nasty clients who didn't provide RX buffer
+	if (fdvio->xfer->data_rx_buf == NULL) {
+		if (fdvio->xfer->size_bytes > sizeof(fdvio->own_rx_buf)) {
+			fdvio_err("Consumer didn't provide the RX buffer, and xfer"
+                      " size is bigger (%zu) than our own RX buf size: "
+                      " %zu", fdvio->xfer->size_bytes, sizeof(fdvio->own_rx_buf));
+			return -EFAULT;
+		}
+		fdvio->xfer->data_rx_buf = &fdvio->own_rx_buf[0];
+	}
+
+	return 0;
 }
 
 /*------------ FDVIO FULL DUPLEX TRANSPORT PLATFORM DEVICE ---------*/
@@ -1140,6 +1168,8 @@ int fdvio_fdif_data_xchange(void __kernel *device
                           , bool force_size_change)
 {
 	FROM_PLATFORM_DEV_TO_FDVIO;
+	fdvio_trace("xfer size: %zu, state: %d", xfer ? xfer->size_bytes : 0
+                , FDVIO_STATE());
 	return fdvio_data_xchange(fdvio, xfer, force_size_change);
 }
 
@@ -1149,6 +1179,8 @@ int fdvio_fdif_default_data_update(void __kernel *device
                                  , bool force_size_change)
 {
 	FROM_PLATFORM_DEV_TO_FDVIO;
+	fdvio_trace("xfer size: %zu, state: %d", xfer ? xfer->size_bytes : 0
+				, FDVIO_STATE());
 	return fdvio_default_data_update(fdvio, xfer, force_size_change);
 }
 
@@ -1164,6 +1196,9 @@ int fdvio_fdif_start(void __kernel *device
 		, struct full_duplex_xfer *initial_xfer)
 {
 	FROM_PLATFORM_DEV_TO_FDVIO;
+	fdvio_trace("xfer size: %zu, state: %d"
+                , initial_xfer ? initial_xfer->size_bytes : 0
+				, FDVIO_STATE());
 	return fdvio_start(fdvio, initial_xfer);
 }
 
@@ -1172,6 +1207,9 @@ int fdvio_fdif_reset(void __kernel *device
              , struct full_duplex_xfer *initial_xfer)
 {
 	FROM_PLATFORM_DEV_TO_FDVIO;
+	fdvio_trace("xfer size: %zu, state: %d"
+                , initial_xfer ? initial_xfer->size_bytes : 0
+				, FDVIO_STATE());
 	return fdvio_reset(fdvio, initial_xfer);
 }
 
@@ -1179,6 +1217,8 @@ int fdvio_fdif_reset(void __kernel *device
 int fdvio_fdif_stop(void __kernel *device)
 {
 	FROM_PLATFORM_DEV_TO_FDVIO;
+	fdvio_trace("stop call, state: %d"
+				, FDVIO_STATE());
 	return fdvio_stop(fdvio);
 }
 
