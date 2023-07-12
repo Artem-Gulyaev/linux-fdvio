@@ -2,7 +2,7 @@
 
 # NOTE: Default build for the fdvio modules
 #       with its different variants
-FROM bosch-linux-full-duplex-interface:latest AS fdvio
+FROM iccom:latest AS fdvio
 
 # Base (default) version
 ARG kernel_source_dir_x86=/repos/linux_x86/
@@ -71,8 +71,7 @@ FROM fdvio AS fdvio-test
 ARG TEST_NAME="bosch-linux-ext-modules-build-test"
 
 ## SIMPLE INSERTION / REMOVAL TEST
-RUN shell-to-initramfs-x86 ${repo_path}/tests/insmod_rmmod_test.sh
-RUN shell-to-initramfs-arm ${repo_path}/tests/insmod_rmmod_test.sh
+RUN python-to-initramfs-x86 ${repo_path}/tests/fdvio_tests.py
 
 ######################### TEST RUN BLOCK ############################
 

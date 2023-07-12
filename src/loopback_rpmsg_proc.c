@@ -252,12 +252,15 @@ struct __lbrp_remote_ept {
 //
 // NOTE: IMPORTANT: each endpoint has a ref to its service,
 //      when all endpoints got deleted, service automatically goes.
+//
+// @lbrp the parent lbrp device ptr (always valid after creation and till rm)
 struct __lbrp_remote_service {
     struct kobject kobj;
 	struct list_head list_anchor;
     char name[RPMSG_NAME_SIZE];
 	struct list_head epts_head;
 	struct mutex epts_lock;
+	struct lb_rpmsg_proc_dev *lbrp;
 };
 
 // Describes the loopback rpmsg proc device.
@@ -1312,6 +1315,7 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
     mutex_init(&rservice->epts_lock);
     INIT_LIST_HEAD(&rservice->epts_head);
     INIT_LIST_HEAD(&rservice->list_anchor);
+	rservice->lbrp = lbrp;
 
     mutex_lock(&lbrp->remote_services_lock);
 
@@ -1343,10 +1347,13 @@ struct __lbrp_remote_service *__lbrp_create_remote_service(
 // @name name of the service to remove
 void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
 {
+	pr_info("@@@@@@@@@@@@ REMOVING SRV\n");
     struct __lbrp_remote_service *service
         = container_of(kobject, struct __lbrp_remote_service, kobj);
+	pr_info("@@@@@@@@@@@@ SERVICE: %px\n", service);
 
     struct lb_rpmsg_proc_dev *lbrp = __lbrp_from_rservice(service);
+	pr_info("@@@@@@@@@@@@ LBRP DEV: %px\n", lbrp);
 
     if (IS_ERR_OR_NULL(lbrp)) {
         pr_err("Can't remove service: no device.");
@@ -1396,6 +1403,7 @@ void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
 
     dev_info(lbrp->dev, "removed remote service: %s", service->name);
 
+	service->lbrp = NULL;
     kfree(service);
 
     mutex_unlock(&lbrp->remote_services_lock);
@@ -1404,8 +1412,7 @@ void __lbrp_remove_remote_service_refcnt0(struct kobject *kobject)
 // RETURNS: the lbrp device for given remote service
 struct lb_rpmsg_proc_dev * __lbrp_from_rservice(struct __lbrp_remote_service *rs)
 {
-    struct device *lbrp_dev = container_of(rs->kobj.parent, struct device, kobj);
-    return (struct lb_rpmsg_proc_dev *)dev_get_drvdata(lbrp_dev);
+    return rs->lbrp;
 }
 
 // Creates/destroys the service (channel) associated with the
@@ -1691,6 +1698,8 @@ static int lbrp_remove_rpmsg_device(struct device *dev, void *data)
 static int lbrp_remove(struct platform_device *pdev)
 {
     struct lb_rpmsg_proc_dev *lbrp = dev_get_drvdata(&pdev->dev);
+
+	dev_info(lbrp->dev, "removing lbrp device: %px", lbrp);
 
     // Remote section
     

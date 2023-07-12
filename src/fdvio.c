@@ -982,9 +982,9 @@ static int __fdvio_ff_dev_close(struct fdvio_dev* fdvio)
 {
 	fdvio_info("platform adapter device closing: %px", fdvio);
 
+	dev_set_drvdata(&fdvio->ff_dev.pdev->dev, NULL);
 	platform_device_unregister(fdvio->ff_dev.pdev);
 	fdvio->ff_dev.pdev = NULL;
-	dev_set_drvdata(&fdvio->ff_dev.pdev->dev, NULL);
 	fdvio->ff_dev.fdtd.iface = NULL;
 	fdvio->ff_dev.fdtd.dev = NULL;
 
