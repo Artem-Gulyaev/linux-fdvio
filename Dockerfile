@@ -68,8 +68,6 @@ RUN mkdir -p ${INITRAMFS_CHROOT_ARM}/modules              \
 
 FROM fdvio AS fdvio-test
 
-ARG TEST_NAME="bosch-linux-ext-modules-build-test"
-
 ## SIMPLE INSERTION / REMOVAL TEST
 RUN python-to-initramfs-x86 ${repo_path}/tests/fdvio_tests.py
 
@@ -80,8 +78,16 @@ RUN python-to-initramfs-x86 ${repo_path}/tests/fdvio_tests.py
 RUN run-qemu-tests-x86
 
 # Check the expected results
-RUN grep "${TEST_NAME}.kernel: PASS" /qemu_run_x86.log
-
+RUN echo "************** OVERALL RESULT ******************" \
+	 	&& grep "fdvio.lbrp_insmod_rmmod: PASS" /qemu_run_x86.log > /dev/null \
+			&& echo "fdvio.lbrp_insmod_rmmod: \033[0;32mPASS\033[0m" \
+		&& grep "fdvio.fdvio_insmod_rmmod: PASS" /qemu_run_x86.log > /dev/null \
+			&& echo "fdvio.fdvio_insmod_rmmod: \033[0;32mPASS\033[0m" \
+		&& grep "fdvio.lbrp_write_to_ept_with_no_receiver: PASS" /qemu_run_x86.log > /dev/null \
+			&& echo "fdvio.lbrp_write_to_ept_with_no_receiver: \033[0;32mPASS\033[0m" \
+		&& grep "fdvio.fdvio_dev_creation_1: PASS" /qemu_run_x86.log > /dev/null \
+			&& echo "fdvio.fdvio_dev_creation_1: \033[0;32mPASS\033[0m"
+        
 ## ARM
 
 ## Create the dtb file

@@ -55,6 +55,39 @@ def lbrp_create_remote_ept(service_name, addr):
                                   , None, True)
     sleep(0.2)
 
+# removes the "remote" endpoint (and service if needed)
+# EXAMPLE:
+#       to remove the endpoint with addr 1234 on "fdvio" service
+#       echo -n -e "fdvio 1234" > REMOVE_EPT_FILE
+def lbrp_remove_remote_ept(service_name, addr):
+
+    print("Removing remote ept: %s:%d" % (service_name, addr))
+
+    remove_ept_file = "/sys/devices/platform/" + lbrp_dev_name() + "/remove_ept"
+    fdvio_common.write_sysfs_file(remove_ept_file
+                                  , (service_name + " " + str(addr)).encode('utf-8')
+                                  , None, True)
+    sleep(0.2)
+
+# Throws if remote endpoint doesn't exist
+def lbrp_ensure_remote_ept(service_name, addr):
+
+    ept_file = ("/sys/devices/platform/" + lbrp_dev_name() + "/"
+                + service_name + "/ept_" + str(addr))
+
+    if not os.path.exists(ept_file):
+        raise Exception("Expected remote ept exist, while it is not: "
+                        + ept_file);
+
+# Throws if remote endpoint exist
+def lbrp_ensure_no_remote_ept(service_name, addr):
+
+    ept_file = ("/sys/devices/platform/" + lbrp_dev_name() + "/"
+                + service_name + "/ept_" + str(addr))
+
+    if os.path.exists(ept_file):
+        raise Exception("Expected remote ept to not exist, while it is: "
+                        + ept_file);
 
 # Sends the data from "remote" service to the local service
 # EXAMPLE:
@@ -72,7 +105,7 @@ def lbrp_send_data(service_name, src_addr, dst_addr, data):
 
     output_data = dst_addr.to_bytes(4, 'big') + data;
 
-    write_sysfs_file(ept_file, output_data.encode('utf-8'), None, True)
+    fdvio_common.write_sysfs_file(ept_file, output_data, None, True)
     sleep(0.2)
 
 
@@ -445,7 +478,7 @@ def test_lbrp_insmod_rmmod(params, get_test_info=False):
             return { "test_description": ("insmod lbrp, check that lbrp dev "
                                           "created, rmmod, check that lbrp dev "
                                           "removed")
-                     , "test_id": "lbrp_test_insmod_rmmod" }
+                     , "test_id": "fdvio.lbrp_insmod_rmmod" }
 
         if lbrp_dev_exists():
             raise Exception("Lbrp device exists before lbrp module insertion.")
@@ -466,12 +499,39 @@ def test_fdvio_insmod_rmmod(params, get_test_info=False):
         if (get_test_info):
             return { "test_description": ("insmod fdvio, "
                                           "rmmod fdvio, ensure nothign crashed")
-                     , "test_id": "fdvio_test_insmod_rmmod" }
+                     , "test_id": "fdvio.fdvio_insmod_rmmod" }
 
         insert_fdvio_module()
 
         remove_fdvio_module()
 
+def test_lbrp_write_to_ept_with_no_receiver(params, get_test_info=False):
+
+        if (get_test_info):
+            return { "test_description": ("insmod lbrp, create fdvio remote service"
+                                          ", write to remote endpoint" 
+                                          "rmmod lbrp, ensure nothign crashed")
+                     , "test_id": "fdvio.lbrp_write_to_ept_with_no_receiver" }
+
+        remote_ept_addr = 5432
+        service_name = "fdvio"
+
+        insert_lbrp_module()
+
+        lbrp_ensure_no_remote_ept(service_name, remote_ept_addr)
+
+        lbrp_create_remote_ept(service_name, remote_ept_addr)
+
+        lbrp_ensure_remote_ept(service_name, remote_ept_addr)
+
+        lbrp_send_data(service_name, remote_ept_addr, 1111
+                       , "hello to nowhere".encode('utf-8'))
+
+        lbrp_remove_remote_ept(service_name, remote_ept_addr)
+
+        lbrp_ensure_no_remote_ept(service_name, remote_ept_addr)
+
+        remove_lbrp_module()
 
 def test_fdvio_dev_creation_1(params, get_test_info=False):
 
@@ -480,7 +540,7 @@ def test_fdvio_dev_creation_1(params, get_test_info=False):
                                           " and endpoint, insmod fdvio, check"
                                           " that fdvio and fdvio_pd devices are"
                                           " created.")
-                     , "test_id": "fdvio_dev_creation.1" }
+                     , "test_id": "fdvio.fdvio_dev_creation_1" }
 
         remote_ept_addr = 5432
         service_name = "fdvio"
@@ -533,6 +593,7 @@ def run_tests():
 
         fdvio_test(test_lbrp_insmod_rmmod, {})
         fdvio_test(test_fdvio_insmod_rmmod, {})
+        fdvio_test(test_lbrp_write_to_ept_with_no_receiver, {})
         fdvio_test(test_fdvio_dev_creation_1, {})
 
 if __name__ == '__main__':
