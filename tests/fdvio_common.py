@@ -29,7 +29,7 @@ def execute_command(command):
 def read_sysfs_file(file, err_expectation, binary=False):
 
     try:
-        with open(file, 'r' + 'b' if binary else '') as file:
+        with open(file, 'r' + ('b' if binary else '')) as file:
             return file.read()
     except OSError as e:
         if err_expectation == None:
@@ -58,7 +58,7 @@ def read_sysfs_file(file, err_expectation, binary=False):
 # Throws an exception if the received error doesn't match expected
 def write_sysfs_file(file, content_to_write, err_expectation, binary=False):
     try:
-        with open(file, 'w' + 'b' if binary else '') as file:
+        with open(file, 'w' + ('b' if binary else '')) as file:
             file.write(content_to_write)
     except OSError as e:
         if err_expectation == None:

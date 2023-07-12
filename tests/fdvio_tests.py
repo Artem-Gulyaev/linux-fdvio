@@ -25,6 +25,13 @@ def insert_fdvio_module():
     fdvio_common.execute_command("insmod /modules/fdvio.ko")
     sleep(0.2)
 
+# inserts the iccom module
+def insert_iccom_module():
+    print("Inserting iccom module.")
+
+    fdvio_common.execute_command("insmod /modules/iccom.ko")
+    sleep(0.2)
+
 # removes the lbrp module
 def remove_lbrp_module():
     print("Removing lbrp module.")
@@ -35,6 +42,12 @@ def remove_lbrp_module():
 def remove_fdvio_module():
     print("Removing fdvio module.")
     fdvio_common.execute_command("rmmod fdvio")
+    sleep(0.2)
+
+# removes the iccom module
+def remove_iccom_module():
+    print("Removing iccom module.")
+    fdvio_common.execute_command("rmmod iccom")
     sleep(0.2)
 
 # RETURNS: if the lbrp dev exists
@@ -192,7 +205,7 @@ def delete_fd_test_transport_device(transport_dev, err_expectation):
 # @iccom_dev {string} iccom device name
 # @err_expectation {number} the errno which is expected
 #                           to be caught. Example: None, errno.EIO, ...
-def link_fd_test_transport_device_to_iccom_device(transport_dev, iccom_dev, err_expectation):
+def attach_transport_device_to_iccom_device(transport_dev, iccom_dev, err_expectation):
     file = "/sys/devices/platform/%s/transport" % (iccom_dev)
     command = transport_dev
     fdvio_common.write_sysfs_file(file, command, err_expectation)
@@ -586,6 +599,56 @@ def test_fdvio_dev_creation_1(params, get_test_info=False):
 
         remove_lbrp_module()
 
+def test_fdvio_dev_bind_to_iccom(params, get_test_info=False):
+
+        if (get_test_info):
+            return { "test_description": (
+                            "insmod lbrp, insmod fdvio, insmod iccom"
+                            " create remote fdvio ept (creates the fdvio device)"
+                            ", insmod fdvio, check"
+                            " that fdvio and fdvio_pd devices are"
+                            " created.")
+                     , "test_id": "fdvio.fdvio_dev_bind_to_iccom" }
+
+        remote_ept_addr = 5432
+        service_name = "fdvio"
+
+        # The device created by the rpmsg, to which the fdvio driver gets
+        # attached.
+        rpmsg_fdvio_dev_name = (lbrp_dev_name() + "." + service_name + ".-1."
+                                + str(remote_ept_addr))
+        rpmsg_fdvio_dev_path = "/sys/bus/rpmsg/devices/" + rpmsg_fdvio_dev_name
+
+        fdvio_platform_dev_name = "fdvio_pd.1"
+        fdvio_platform_dev_path = ("/sys/devices/platform/"
+                                   + fdvio_platform_dev_name)
+        iccom_dev = "iccom.0"
+
+        # Action!
+
+        insert_lbrp_module()
+        insert_fdvio_module()
+        insert_iccom_module()
+
+        lbrp_create_remote_ept(service_name, remote_ept_addr)
+
+        if not os.path.exists(fdvio_platform_dev_path):
+            raise Exception(fdvio_platform_dev_path
+                            + " doesn't exist after ept creation.")
+
+        create_iccom_device(None)
+
+        attach_transport_device_to_iccom_device(fdvio_platform_dev_name
+                                                , iccom_dev, None)
+
+        create_iccom_sysfs_channel(iccom_dev, 1, None)
+
+        delete_iccom_device(iccom_dev, None)
+
+        remove_iccom_module()
+        remove_fdvio_module()
+        remove_lbrp_module()
+
 
 #--------------------------- MAIN ------------------------------------#
 
@@ -595,6 +658,7 @@ def run_tests():
         fdvio_test(test_fdvio_insmod_rmmod, {})
         fdvio_test(test_lbrp_write_to_ept_with_no_receiver, {})
         fdvio_test(test_fdvio_dev_creation_1, {})
+        fdvio_test(test_fdvio_dev_bind_to_iccom, {})
 
 if __name__ == '__main__':
 

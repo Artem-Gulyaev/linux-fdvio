@@ -101,6 +101,11 @@
 
 #define CAST_DEVICE_TO_FDVIO                                        \
         struct fdvio_dev *fdvio = (struct fdvio_dev *)device;
+#define FROM_PLATFORM_DEV_TO_FDVIO                                  \
+        struct fdvio_dev *fdvio = ((struct full_duplex_device *)    \
+                                       dev_get_drvdata(             \
+											(struct device*)device))->dev;
+
 #define FDVIO_CHECK_DEVICE(error_action)                    \
 	if (IS_ERR_OR_NULL(fdvio)) {                            \
 		fdvio_err("no device;");                            \
@@ -266,20 +271,6 @@
 // No current xfer provided
 #define FDVIO_ERROR_NO_XFER 9
 
-// The platform device we register on creation to make it working
-// with ICCom. It works only as a formal adapter to the ICCom expectations.
-// NOTE: later this to be polished.
-//
-// @pdev the platform device
-// @fdtd the full duplex transport device.
-//      * .dev points to fdvio
-//		NOTE: the platform driver data points to the @tdtd.
-struct fdvio_fdtd_dev {
-	struct platform_device *pdev;
-
-	// drv_data points to this struct.
-	struct full_duplex_device fdtd;
-};
 
 // The device itself
 // @magic the field where the FDVIO_MAGIC should be written upon the
@@ -296,7 +287,12 @@ struct fdvio_fdtd_dev {
 //      it is enabled every time when we start waiting for the
 //      other side data, and is disabled every time we finish
 //      the waiting.
-// @ff_dev the device-adapter to ICCom
+// @pdev The platform device we register on creation to make it working
+//    with ICCom. It works only as a formal adapter to the ICCom expectations.
+//    NOTE: later this to be polished.
+// @fdtd the full duplex transport device.
+//      * .dev points to fdvio
+//		NOTE: the platform driver data points to the @tdtd.
 struct fdvio_dev {
 	uint32_t magic;
 	atomic_t state; 
@@ -311,7 +307,9 @@ struct fdvio_dev {
 
 	struct timer_list wait_timeout_timer;
 
-	struct fdvio_fdtd_dev ff_dev;
+	struct platform_device *pdev;
+	// drv_data points to this struct.
+	struct full_duplex_device fdtd;
 };
 
 /*---------------------- PRE DECLARATIONS ----------------------------*/
@@ -360,6 +358,7 @@ static void fdvio_remove(struct rpmsg_device *rpdev);
 //     the xfer the separate xfer will be created and pointed to by @xfer
 //     here)
 // See the Full Duplex xfer interface for full description.
+// @device is a pointer to the fdvio device
 //
 // STATUS:
 //     * IDLE->XFER
@@ -391,6 +390,7 @@ EXPORT_SYMBOL(fdvio_data_xchange);
 
 // Updates the default data. Not used by ICComm and probably
 // will be dropped later in IF.
+// @device is a pointer to the fdvio device
 __maybe_unused
 int fdvio_default_data_update(void __kernel *device
                            , struct full_duplex_xfer *xfer
@@ -408,6 +408,7 @@ int fdvio_default_data_update(void __kernel *device
 }
 EXPORT_SYMBOL(fdvio_default_data_update);
 
+// @device is a pointer to the fdvio device
 // RETURNS: true if fdvio is in one of running states
 __maybe_unused
 bool fdvio_is_running(void __kernel *device)
@@ -434,7 +435,7 @@ __maybe_unused
 int fdvio_start(void __kernel *device
 		, struct full_duplex_xfer *initial_xfer)
 {
-    CAST_DEVICE_TO_FDVIO;
+	CAST_DEVICE_TO_FDVIO;
     FDVIO_CHECK_DEVICE(return -ENODEV);
     FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
 	FDVIO_CHECK_PTR(fdvio->rpdev, return -ENODEV);
@@ -443,8 +444,9 @@ int fdvio_start(void __kernel *device
 	fdvio_info("starting device: %px", device);
 
 	if (FDVIO_STATE() != FDVIO_STATE_INITIALIZED) {
-		fdvio_info("Device must be in initialized state: %px, can not start."
-					, device);
+		fdvio_info("Device must be in initialized state: %px,\n"
+                   " can not start, actual state: %d."
+					, device, FDVIO_STATE());
 		return -EFAULT;
 	}
 
@@ -474,6 +476,8 @@ EXPORT_SYMBOL(fdvio_start);
 //
 // Closes the device.
 // See struct full_duplex_interface description for more info.
+// @device is a pointer to the fdvio device
+//
 // RETURNS:
 // 		>=0: all ok even if device is already or closed
 // 			or never initialized
@@ -481,7 +485,7 @@ EXPORT_SYMBOL(fdvio_start);
 __maybe_unused
 int fdvio_stop(void __kernel *device)
 {
-    CAST_DEVICE_TO_FDVIO;
+	CAST_DEVICE_TO_FDVIO;
     FDVIO_CHECK_DEVICE(return -ENODEV);
     FDVIO_CHECK_KERNEL_DEVICE(return -ENODEV);
 	FDVIO_CHECK_PTR(fdvio->rpdev, return -ENODEV);
@@ -528,6 +532,7 @@ int fdvio_stop(void __kernel *device)
 EXPORT_SYMBOL(fdvio_stop);
 
 // Just reset it. Stop and start it again.
+// @device is a pointer to the fdvio device
 __maybe_unused
 int fdvio_reset(void __kernel *device
              , struct full_duplex_xfer *initial_xfer)
@@ -952,28 +957,33 @@ int __fdvio_accept_data(struct fdvio_dev* fdvio
 //		!0: negated error code
 static int __fdvio_ff_dev_init(struct fdvio_dev* fdvio)
 {
-	fdvio_info("starting initialization of platform adapter device: %px", fdvio);
+	fdvio_info("starting initialization of platform adapter device");
 
-	fdvio->ff_dev.fdtd.dev = fdvio;
-	fdvio->ff_dev.fdtd.iface = full_duplex_fdvio_iface();
-
-	fdvio->ff_dev.pdev = platform_device_register_simple("fdvio_pd", 1, NULL, 0);
-
-	if (IS_ERR_OR_NULL(fdvio->ff_dev.pdev)) {
+	fdvio->pdev = platform_device_register_simple("fdvio_pd", 1, NULL, 0);
+	if (IS_ERR_OR_NULL(fdvio->pdev)) {
 		fdvio_err("could not create the platform device for fdvio");
 		goto pd_register_failed;
 	}
 
-	dev_set_drvdata(&fdvio->ff_dev.pdev->dev, &fdvio->ff_dev.fdtd);
+	fdvio->fdtd.dev = fdvio;
+	fdvio->fdtd.iface = full_duplex_fdvio_iface();
+    // Must point to the full duplex device struct
+	// in our case the struct is located here: fdvio->fdtd
+	dev_set_drvdata(&fdvio->pdev->dev, &fdvio->fdtd);
 	
-	fdvio_info("platform adapter device initialized: %px", fdvio);
+	fdvio_info("full duplex transport device: %px -> dev: %px, if: %px"
+               , &fdvio->fdtd, fdvio->fdtd.dev, fdvio->fdtd.iface);
+	
+	fdvio_info("platform device initialized: %px, fdtd ptr (from drvdata): %px"
+               , fdvio->pdev
+               , dev_get_drvdata(&fdvio->pdev->dev));
 
 	return 0;
 
 pd_register_failed:
-	dev_set_drvdata(&fdvio->ff_dev.pdev->dev, NULL);
-	fdvio->ff_dev.fdtd.iface = NULL;
-	fdvio->ff_dev.fdtd.dev = NULL;
+	dev_set_drvdata(&fdvio->pdev->dev, NULL);
+	fdvio->fdtd.iface = NULL;
+	fdvio->fdtd.dev = NULL;
 	return -EFAULT;
 }
 
@@ -982,11 +992,11 @@ static int __fdvio_ff_dev_close(struct fdvio_dev* fdvio)
 {
 	fdvio_info("platform adapter device closing: %px", fdvio);
 
-	dev_set_drvdata(&fdvio->ff_dev.pdev->dev, NULL);
-	platform_device_unregister(fdvio->ff_dev.pdev);
-	fdvio->ff_dev.pdev = NULL;
-	fdvio->ff_dev.fdtd.iface = NULL;
-	fdvio->ff_dev.fdtd.dev = NULL;
+	dev_set_drvdata(&fdvio->pdev->dev, NULL);
+	platform_device_unregister(fdvio->pdev);
+	fdvio->pdev = NULL;
+	fdvio->fdtd.iface = NULL;
+	fdvio->fdtd.dev = NULL;
 
 	fdvio_info("platform adapter device closed: %px", fdvio);
 
@@ -1075,7 +1085,9 @@ int __fdvio_init(void __kernel *device)
 
 	__fdvio_ff_dev_init(fdvio);
 
-	(void)FDVIO_SWITCH_STRICT(COLD, INITIALIZED);
+	if (!FDVIO_SWITCH_STRICT(COLD, INITIALIZED)) {
+		BUG_ON(true);
+	};
 
 	fdvio_info("fdvio device initialized: %px", device);
 	return 0;
@@ -1122,13 +1134,61 @@ int __fdvio_close(void __kernel *device)
 
 /*----------- FDVIO FULL DUPLEX INTERFACE DEFINITION ---------------*/
 
+// @device is a pointer to the PLATFORM DEVICE: struct device*
+int fdvio_fdif_data_xchange(void __kernel *device
+                          , struct __kernel full_duplex_xfer *xfer
+                          , bool force_size_change)
+{
+	FROM_PLATFORM_DEV_TO_FDVIO;
+	return fdvio_data_xchange(fdvio, xfer, force_size_change);
+}
+
+// @device is a pointer to the PLATFORM DEVICE: struct device*
+int fdvio_fdif_default_data_update(void __kernel *device
+                                 , struct full_duplex_xfer *xfer
+                                 , bool force_size_change)
+{
+	FROM_PLATFORM_DEV_TO_FDVIO;
+	return fdvio_default_data_update(fdvio, xfer, force_size_change);
+}
+
+// @device is a pointer to the PLATFORM DEVICE: struct device*
+bool fdvio_fdif_is_running(void __kernel *device)
+{
+	FROM_PLATFORM_DEV_TO_FDVIO;
+	return fdvio_is_running(fdvio);
+}
+
+// @device is a pointer to the PLATFORM DEVICE: struct device*
+int fdvio_fdif_start(void __kernel *device
+		, struct full_duplex_xfer *initial_xfer)
+{
+	FROM_PLATFORM_DEV_TO_FDVIO;
+	return fdvio_start(fdvio, initial_xfer);
+}
+
+// @device is a pointer to the PLATFORM DEVICE: struct device*
+int fdvio_fdif_reset(void __kernel *device
+             , struct full_duplex_xfer *initial_xfer)
+{
+	FROM_PLATFORM_DEV_TO_FDVIO;
+	return fdvio_reset(fdvio, initial_xfer);
+}
+
+// @device is a pointer to the PLATFORM DEVICE: struct device*
+int fdvio_fdif_stop(void __kernel *device)
+{
+	FROM_PLATFORM_DEV_TO_FDVIO;
+	return fdvio_stop(fdvio);
+}
+
 const struct full_duplex_sym_iface fdvio_duplex_iface = {
-	.data_xchange = &fdvio_data_xchange
-	, .default_data_update = &fdvio_default_data_update
-	, .is_running = &fdvio_is_running
-	, .init = &fdvio_start
-	, .reset = &fdvio_reset
-	, .close = &fdvio_stop
+	.data_xchange = &fdvio_fdif_data_xchange
+	, .default_data_update = &fdvio_fdif_default_data_update
+	, .is_running = &fdvio_fdif_is_running
+	, .init = &fdvio_fdif_start
+	, .reset = &fdvio_fdif_reset
+	, .close = &fdvio_fdif_stop
 };
 
 // API
