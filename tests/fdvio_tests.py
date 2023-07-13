@@ -948,6 +948,58 @@ def test_iccom_fdvio_lbrp_data_stress(params, get_test_info=False):
     remove_iccom_module()
     remove_fdvio_module()
     remove_lbrp_module()
+
+
+def test_iccom_fdvio_lbrp_data_multipackage_msgs_stress(params, get_test_info=False):
+
+    if (get_test_info):
+        return { "test_description": (
+                        "insmod lbrp, insmod fdvio, insmod iccom"
+                        " create remote fdvio ept (creates the fdvio device)"
+                        ", bind iccom to fdvio platform device,"
+                        " , create & set iccom sysfs channel"
+                        " , write to this channel, check data pops in lbrp"
+                        " and in iccom.")
+                 , "test_id": "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress" }
+
+    iccom_dev = "iccom.0"
+    iccom_ch = 1
+    remote_ept_addr = 5432
+    service_name = "fdvio"
+    fdvio_platform_dev_name = "fdvio_pd.1"
+    fdvio_platform_dev_path = ("/sys/devices/platform/"
+                               + fdvio_platform_dev_name)
+
+    # ACTION!
+
+    insert_lbrp_module()
+    insert_fdvio_module()
+    insert_iccom_module()
+
+    lbrp_create_remote_ept(service_name, remote_ept_addr)
+
+    create_iccom_device(None)
+    attach_transport_device_to_iccom_device(fdvio_platform_dev_name
+                                            , iccom_dev, None)
+
+    create_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+    set_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+
+    seq_id = 1
+    for i in range(30):
+        _, seq_id = lbrp_iccom_do_message(
+                       l2i_msg_bytes=bytearray(os.urandom(1000))
+                       , i2l_msg_bytes=bytearray(os.urandom(1000))
+                       , iccom_ch=1
+                       , iccom_rpmsg_addr=None
+                       , iccom_dev=iccom_dev
+                       , start_seq_num=seq_id)
+
+    remove_iccom_module()
+    remove_fdvio_module()
+    remove_lbrp_module()
+
+
 #--------------------------- MAIN ------------------------------------#
 
 def run_tests():
@@ -959,6 +1011,7 @@ def run_tests():
         fdvio_test(test_fdvio_dev_bind_to_iccom, {})
         fdvio_test(test_iccom_fdvio_lbrp_data_path, {})
         fdvio_test(test_iccom_fdvio_lbrp_data_stress, {})
+        fdvio_test(test_iccom_fdvio_lbrp_data_multipackage_msgs_stress, {})
 
 if __name__ == '__main__':
 
