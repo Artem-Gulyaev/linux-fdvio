@@ -6,6 +6,8 @@ import os
 import string
 import random
 
+import traceback
+
 import fdvio_common as fdvio_common
 
 def lbrp_dev_name():
@@ -254,17 +256,17 @@ def set_iccom_sysfs_channel(iccom_dev, channel, err_expectation):
 #
 # @iccom_dev {string} id of the iccom device
 # @channel {number} the destination channel id
-# @message {string} message to send
+# @message {bytearray/string} message to send
 # @err_expectation {number} the errno which is expected
 #                           to be caught. Example: None, errno.EIO, ...
-def iccom_send(iccom_dev, channel, message, err_expectation):
+def iccom_send(iccom_dev, channel, message, err_expectation, binary=False):
     # Set sysfs channel to work with
     set_iccom_sysfs_channel(iccom_dev, channel, None)
     # Write to the working sysfs channel
     file = "/sys/devices/platform/%s/channels_RW" % (iccom_dev)
     print("iccom_send: " + str(channel))
     command = message
-    fdvio_common.write_sysfs_file(file, command, err_expectation)
+    fdvio_common.write_sysfs_file(file, command, err_expectation, binary=binary)
 
 # Reads message from the given iccom sysfs channel and propagate
 # the error expectations
@@ -274,15 +276,15 @@ def iccom_send(iccom_dev, channel, message, err_expectation):
 # @err_expectation {number} the errno which is expected
 #                           to be caught. Example: None, errno.EIO, ...
 # Returns:
-# Empty String
-# String with data read
-def iccom_read(iccom_dev, channel, err_expectation):
+# Empty String/bytearray
+# String/bytearray with data read
+def iccom_read(iccom_dev, channel, err_expectation, binary=False):
     # Set sysfs channel to work with
     set_iccom_sysfs_channel(iccom_dev, channel, None)
     # Read from the working sysfs channel
     file = "/sys/devices/platform/%s/channels_RW" % (iccom_dev)
     print("iccom_read: " + str(channel))
-    output = fdvio_common.read_sysfs_file(file, err_expectation)
+    output = fdvio_common.read_sysfs_file(file, err_expectation, binary=binary)
     return output
 
 #----------------------- TEST HELPERS --------------------------------#
@@ -387,6 +389,15 @@ def delete_transport_device_RW_files(transport_dev, err_expectation):
     command = "d"
     fdvio_common.write_sysfs_file(file, command, err_expectation)
 
+# Iccom packaging configuration
+def iccom_params():
+    return {
+        "PACKAGE_SIZE_BYTES": 64
+        , "CRC32_SIZE_BYTES": 4
+        , "PAYLOAD_LEN_SIZE_BYTES": 2
+        , "SEQ_NUMBER_SIZE_BYTES": 1
+    }
+
 # Provides package on the basis of the package payload
 # NOTE: by package payload is meant
 #   * packets
@@ -402,20 +413,26 @@ def delete_transport_device_RW_files(transport_dev, err_expectation):
 #
 # RETURNS: the new bytearray - a complete package ready to sent
 def iccom_package(package_sequential_number, package_payload):
-    PACKAGE_SIZE_BYTES = 64
-    CRC32_SIZE_BYTES = 4
+    PACKAGE_SIZE_BYTES = iccom_params()["PACKAGE_SIZE_BYTES"]
+    CRC32_SIZE_BYTES =  iccom_params()["CRC32_SIZE_BYTES"]
+    PAYLOAD_LEN_SIZE_BYTES =  iccom_params()["PAYLOAD_LEN_SIZE_BYTES"]
+    SEQ_NUMBER_SIZE_BYTES =  iccom_params()["SEQ_NUMBER_SIZE_BYTES"]
 
     if (package_sequential_number > 0xff) or (package_sequential_number < 0):
         raise ValueError("The package_sequential_number must fit the unsigned"
                          " byte in size, but now given: %s"
                          % (str(package_sequential_number)))
-    if (len(package_payload) > PACKAGE_SIZE_BYTES - CRC32_SIZE_BYTES):
+
+    payload_room = iccom_package_payload_area_size()
+    if (len(package_payload) > payload_room):
         raise RuntimeError("The package payload is too big: %d."
                            " It can me max %d bytes size."
-                           % (len(package_payload), PACKAGE_SIZE_BYTES - CRC32_SIZE_BYTES))
+                           % (len(package_payload), payload_room))
 
-    package_header = bytearray((len(package_payload)).to_bytes(2, "big")
-                               + package_sequential_number.to_bytes(1, "little"))
+    package_header = bytearray((len(package_payload))
+                                    .to_bytes(PAYLOAD_LEN_SIZE_BYTES, "big")
+                               + package_sequential_number
+                                    .to_bytes(SEQ_NUMBER_SIZE_BYTES, "little"))
 
     padding_size = (PACKAGE_SIZE_BYTES - len(package_header)
                     - len(package_payload) - CRC32_SIZE_BYTES)
@@ -427,6 +444,16 @@ def iccom_package(package_sequential_number, package_payload):
     full_package = padded_package + bytearray(crc32.to_bytes(CRC32_SIZE_BYTES, "little"))
 
     return full_package
+
+# RETURNS: the payload room size of an iccom package
+def iccom_package_payload_area_size():
+    PACKAGE_SIZE_BYTES = iccom_params()["PACKAGE_SIZE_BYTES"]
+    CRC32_SIZE_BYTES =  iccom_params()["CRC32_SIZE_BYTES"]
+    PAYLOAD_LEN_SIZE_BYTES =  iccom_params()["PAYLOAD_LEN_SIZE_BYTES"]
+    SEQ_NUMBER_SIZE_BYTES =  iccom_params()["SEQ_NUMBER_SIZE_BYTES"]
+
+    return (PACKAGE_SIZE_BYTES - CRC32_SIZE_BYTES
+                    - PAYLOAD_LEN_SIZE_BYTES - SEQ_NUMBER_SIZE_BYTES)
 
 # RETURNS: the bytearray of the ACK iccom package
 def iccom_ack_package():
@@ -450,6 +477,10 @@ def iccom_packet(channel, payload, complete):
             + ((channel & 0x7F80) >> 7).to_bytes(1, "big")
             + ((channel & 0x007F) | (0x80 if complete else 0x00)).to_bytes(1, "big")
             + payload )
+
+# RETURNS: the packet header length in bytes
+def iccom_packet_header_len():
+    return 4
 
 # Checks the single package for proper on-wire layout generation
 # to ensure the tests themselves are testing against proper data.
@@ -486,6 +517,116 @@ def fdvio_test(test_sequence, params):
             print("%s: PASS" % (test_id,))
         except Exception as e:
             print("%s: FAILED: %s (test description: %s)" % (test_id, str(e), test_descr))
+            traceback.print_exc()
+
+# Makes a full data exchange with ICCom via lbrp on given channel.
+# @l2i_wire_data the wire data to be sent to ICCom
+# @i2l_expected_wire_data the wire data expected from ICCom
+# @iccom_rpmsg_addr already known iccom rpmsg address (we know it only first
+#   data package comes from ICCom.
+#   NOTE: if it is unknown, we first read the data and then only send it
+# 
+# RETURNS: iccom rpmsg addr
+def lbrp_iccom_do_frame(l2i_wire_data
+                        , i2l_expected_wire_data
+                        , iccom_rpmsg_addr=None
+                        , frame_name=""):
+    
+    remote_ept_addr = 5432
+    service_name = "fdvio"
+
+    # Data frame
+    print("== %s frame:" % (frame_name,))
+
+    rcv_wire_data = None;
+
+    # If we don't know the rpmsg address of the iccom yet, we will need to
+    # read the data from iccom first to find this out, but the normal case
+    # is always send before read.
+    if iccom_rpmsg_addr is not None: 
+        # known addr case (normal)
+        lbrp_send_data(service_name, remote_ept_addr, iccom_rpmsg_addr, l2i_wire_data)
+        sleep(0.1)
+        iccom_rpmsg_addr, rcv_wire_data = lbrp_read_data(service_name, remote_ept_addr)
+    else:
+        # yet unknown addr case
+        iccom_rpmsg_addr, rcv_wire_data = lbrp_read_data(service_name, remote_ept_addr)
+        lbrp_send_data(service_name, remote_ept_addr, iccom_rpmsg_addr, l2i_wire_data)
+        sleep(0.1)
+
+    print("<- real:      %s" % (rcv_wire_data.hex(),))
+    print("<- expected:  %s" % (i2l_expected_wire_data.hex(),))
+    if (rcv_wire_data != i2l_expected_wire_data):
+        raise Exception("Received unexpected data from ICCom.")
+
+    return iccom_rpmsg_addr
+
+# Does the data exchange between ICCom and Lbrp
+# @l2i_msg_bytes lbrp -> ICCom message (can be None)
+# @i2l_msg_bytes ICCom -> lbrp message (can be None)
+# @iccom_ch iccom channel to work with
+#
+# RETURNS:
+#       (iccom rpmsg address, nex_package_seq_num)
+def lbrp_iccom_do_message(l2i_msg_bytes
+                        , i2l_msg_bytes
+                        , iccom_ch
+                        , iccom_rpmsg_addr=None
+                        , iccom_dev="iccom.0"
+                        , start_seq_num=1):
+    if l2i_msg_bytes is None:
+        l2i_msg_bytes = bytearray()
+    if i2l_msg_bytes is None:
+        i2l_msg_bytes = bytearray()
+
+    if len(i2l_msg_bytes) > 0:
+        iccom_send(iccom_dev, iccom_ch, i2l_msg_bytes, None, binary=True)
+        sleep(0.1)
+
+    seq_pkg_num = start_seq_num
+    first = True
+    while (len(i2l_msg_bytes) > 0 or len (l2i_msg_bytes) > 0):
+
+        payload_room = iccom_package_payload_area_size() - iccom_packet_header_len()
+
+        l2i_package = iccom_package(seq_pkg_num
+                          , bytearray() if len(l2i_msg_bytes) == 0
+                            else iccom_packet(iccom_ch
+                              , l2i_msg_bytes[0:payload_room]
+                              , payload_room >= len(l2i_msg_bytes)))
+        i2l_package = iccom_package(seq_pkg_num
+                          , bytearray() if first or len(i2l_msg_bytes) == 0
+                            else iccom_packet(iccom_ch
+                              ,  i2l_msg_bytes[0:payload_room]
+                              , payload_room >= len(i2l_msg_bytes)))
+
+        l2i_msg_bytes = l2i_msg_bytes[payload_room:]
+        if not first:
+            i2l_msg_bytes = i2l_msg_bytes[payload_room:]
+
+        # data frame
+        iccom_rpmsg_addr = lbrp_iccom_do_frame(l2i_package, i2l_package
+                                               , iccom_rpmsg_addr
+                                               , "Data.%d" % seq_pkg_num)
+        #  ack frame
+        lbrp_iccom_do_frame(iccom_ack_package(), iccom_ack_package()
+                            , iccom_rpmsg_addr, "Ack.%d" % seq_pkg_num)
+        seq_pkg_num += 1
+
+        if seq_pkg_num >= 256:
+            seq_pkg_num = 0
+
+        if first:
+            first = False;
+
+    l2i_msg_real = iccom_read(iccom_dev, iccom_ch, None, binary=True)
+
+    print("On ICCom side: <- real:      %s" % (l2i_msg_real.hex(),))
+    print("On ICCom side: <- expected:  %s" % (l2i_msg_bytes.hex(),))
+
+    return (iccom_rpmsg_addr, seq_pkg_num)
+
+
 
 #--------------------------- TESTS -----------------------------------#
 
@@ -704,7 +845,8 @@ def test_iccom_fdvio_lbrp_data_path(params, get_test_info=False):
                                 , "hello to iccom!".encode("utf-8"), True))
         iccom2lbrp_data = iccom_package(1, bytearray())
 
-        iccom_send(iccom_dev, iccom_ch, "hello to lbrp!", None)
+        iccom_send(iccom_dev, iccom_ch, "hello to lbrp!".encode("utf-8")
+                   , None, binary=True)
         sleep(0.4)
         iccom_addr, rcv_data = lbrp_read_data(service_name, remote_ept_addr)
 
@@ -733,8 +875,8 @@ def test_iccom_fdvio_lbrp_data_path(params, get_test_info=False):
         sleep(0.4)
 
         # Check if data popped on iccom side
-        str2iccom_expected = "hello to iccom!"
-        str2iccom_real = iccom_read(iccom_dev, iccom_ch, None)
+        str2iccom_expected = "hello to iccom!".encode("utf-8")
+        str2iccom_real = iccom_read(iccom_dev, iccom_ch, None, binary=True)
 
         print("On ICCom side: <- real:      %s" % (str2iccom_real,))
         print("On ICCom side: <- expected:  %s" % (str2iccom_expected,))
@@ -748,6 +890,64 @@ def test_iccom_fdvio_lbrp_data_path(params, get_test_info=False):
         remove_fdvio_module()
         remove_lbrp_module()
 
+
+def test_iccom_fdvio_lbrp_data_stress(params, get_test_info=False):
+
+    if (get_test_info):
+        return { "test_description": (
+                        "insmod lbrp, insmod fdvio, insmod iccom"
+                        " create remote fdvio ept (creates the fdvio device)"
+                        ", bind iccom to fdvio platform device,"
+                        " , create & set iccom sysfs channel"
+                        " , write to this channel, check data pops in lbrp"
+                        " and in iccom.")
+                 , "test_id": "fdvio.iccom_fdvio_lbrp_data_stress" }
+
+    iccom_dev = "iccom.0"
+    iccom_ch = 1
+    remote_ept_addr = 5432
+    service_name = "fdvio"
+    fdvio_platform_dev_name = "fdvio_pd.1"
+    fdvio_platform_dev_path = ("/sys/devices/platform/"
+                               + fdvio_platform_dev_name)
+
+    # ACTION!
+
+    insert_lbrp_module()
+    insert_fdvio_module()
+    insert_iccom_module()
+
+    lbrp_create_remote_ept(service_name, remote_ept_addr)
+
+    create_iccom_device(None)
+    attach_transport_device_to_iccom_device(fdvio_platform_dev_name
+                                            , iccom_dev, None)
+
+    create_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+    set_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+
+
+    seq_id = 1
+    for i in range(100):
+        _, seq_id = lbrp_iccom_do_message(
+                       l2i_msg_bytes=("hello, I'm lbrp".encode("utf-8"))
+                       , i2l_msg_bytes=("hello, I'm iccom".encode("utf-8"))
+                       , iccom_ch=1
+                       , iccom_rpmsg_addr=None
+                       , iccom_dev=iccom_dev
+                       , start_seq_num=seq_id)
+
+        _, seq_id = lbrp_iccom_do_message(
+                       l2i_msg_bytes=("How are you, in Linux?".encode("utf-8"))
+                       , i2l_msg_bytes=("How are you, behind rpmsg?".encode("utf-8"))
+                       , iccom_ch=1
+                       , iccom_rpmsg_addr=None
+                       , iccom_dev=iccom_dev
+                       , start_seq_num=seq_id)
+
+    remove_iccom_module()
+    remove_fdvio_module()
+    remove_lbrp_module()
 #--------------------------- MAIN ------------------------------------#
 
 def run_tests():
@@ -758,6 +958,7 @@ def run_tests():
         fdvio_test(test_fdvio_dev_creation_1, {})
         fdvio_test(test_fdvio_dev_bind_to_iccom, {})
         fdvio_test(test_iccom_fdvio_lbrp_data_path, {})
+        fdvio_test(test_iccom_fdvio_lbrp_data_stress, {})
 
 if __name__ == '__main__':
 
