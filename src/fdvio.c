@@ -38,7 +38,7 @@
 
 // the level of debugging
 // 0 - no debug
-#define FDVIO_DEBUG_LEVEL 1
+#define FDVIO_DEBUG_LEVEL 0
 
 /* --------------------- UTILITIES SECTION ----------------------------- */
 
@@ -127,10 +127,18 @@
 	}
 
 // Bool value, true, when switch occured
+#ifdef FDVIO_DEBUG
 #define FDVIO_SWITCH_STRICT(from, to)                          \
-	(fdvio_trace(" -> "#to), atomic_cmpxchg(&fdvio->state,    \
+	(fdvio_trace(" -> "#to), atomic_cmpxchg(&fdvio->state,     \
 					FDVIO_STATE_##from,                        \
 					FDVIO_STATE_##to) == FDVIO_STATE_##from)
+#else
+#define FDVIO_SWITCH_STRICT(from, to)                          \
+	(atomic_cmpxchg(&fdvio->state,                             \
+					FDVIO_STATE_##from,                        \
+					FDVIO_STATE_##to) == FDVIO_STATE_##from)
+#endif
+
 #define FDVIO_SWITCH_FORCED(to)                          \
 	atomic_set(&fdvio->state, FDVIO_STATE_##to)
 #define FDVIO_STATE_IS(st_name)                          \

@@ -95,7 +95,13 @@ RUN echo "************** OVERALL RESULT ******************" \
 			&& echo "fdvio.iccom_fdvio_lbrp_data_stress: \033[0;32mPASS\033[0m" \
 		&& grep "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress: PASS" /qemu_run_x86.log > /dev/null \
 			&& echo "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress: \033[0;32mPASS\033[0m" \
+		&& grep "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing: PASS" /qemu_run_x86.log > /dev/null \
+			&& echo "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing: \033[0;32mPASS\033[0m" \
  
+#RUN echo "************** OVERALL RESULT ******************" \
+#		&& grep "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing: PASS" /qemu_run_x86.log > /dev/null \
+#			&& echo "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing: \033[0;32mPASS\033[0m" \
+
 ## ARM
 
 ## Create the dtb file
