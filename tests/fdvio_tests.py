@@ -664,7 +664,8 @@ def lbrp_iccom_do_racing_message(l2i_msg_bytes
                         , iccom_rpmsg_addr=None
                         , iccom_dev="iccom.0"
                         , start_seq_num=1
-                        , iccom_inject_pos=-1):
+                        , iccom_inject_pos=-1
+                        , inject_size_mismatch_frame=None):
     payload_room = iccom_package_payload_area_size() - iccom_packet_header_len()
     i2l_idle = True
 
@@ -723,8 +724,38 @@ def lbrp_iccom_do_racing_message(l2i_msg_bytes
             inject_iccom_message()
 
         #  ack frame
-        lbrp_iccom_do_frame(iccom_ack_package(), iccom_ack_package()
-                            , iccom_rpmsg_addr, "Ack.%d" % seq_pkg_num)
+        if i != inject_size_mismatch_frame:
+            lbrp_iccom_do_frame(iccom_ack_package(), iccom_ack_package()
+                                , iccom_rpmsg_addr, "Ack.%d" % seq_pkg_num)
+        else:
+            # size mismatch path: we're sending the wrongly-sized
+            # message to check the size mismatch path
+            lbrp_iccom_do_frame(iccom_package(31, "123456789".encode("utf-8"))
+                                , iccom_ack_package()
+                                , iccom_rpmsg_addr
+                                , "Broken Ack from LBRP")
+
+            # this will raise an error in fdvio and this error will be
+            # propagated to the ICCom, and then iccom and we will send the
+            # nack frames and then resend the last data
+
+            lbrp_iccom_do_frame(iccom_nack_package(), iccom_nack_package()
+                                , iccom_rpmsg_addr, "Error recovery")
+        
+            
+            # We repeat our last data frame
+
+            iccom_rpmsg_addr, i2l_idle = lbrp_iccom_do_frame(
+                                              l2i_package, i2l_package
+                                              , iccom_rpmsg_addr
+                                              , "Repeat Data.%d" % seq_pkg_num
+                                              , i2l_expected_alternative_wire_data
+                                                =i2l_package_alt if i2l_idle else None
+                                              )
+
+            lbrp_iccom_do_frame(iccom_ack_package(), iccom_ack_package()
+                                , iccom_rpmsg_addr, "Repeat Ack.%d" % seq_pkg_num)
+
         seq_pkg_num += 1
 
         if seq_pkg_num >= 256:
@@ -1181,6 +1212,66 @@ def test_iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing(
     remove_fdvio_module()
     remove_lbrp_module()
 
+def test_iccom_fdvio_lbrp_data_error_size_mismatch(
+                                    params, get_test_info=False):
+
+    if (get_test_info):
+        return { "test_description": (
+                        "insmod lbrp, insmod fdvio, insmod iccom"
+                        " create remote fdvio ept (creates the fdvio device)"
+                        ", bind iccom to fdvio platform device,"
+                        " , create & set iccom sysfs channel"
+                        " , write to this channel, use wrong message from lbrp side"
+                        " randomly, but still check data pops in lbrp"
+                        " and in iccom.")
+                 , "test_id": "fdvio.iccom_fdvio_lbrp_data_error_size_mismatch" }
+
+    iccom_dev = "iccom.0"
+    iccom_ch = 1
+    remote_ept_addr = 5432
+    service_name = "fdvio"
+    fdvio_platform_dev_name = "fdvio_pd.1"
+    fdvio_platform_dev_path = ("/sys/devices/platform/"
+                               + fdvio_platform_dev_name)
+
+    # ACTION!
+
+    insert_lbrp_module()
+    insert_fdvio_module()
+    insert_iccom_module()
+
+    lbrp_create_remote_ept(service_name, remote_ept_addr)
+
+    create_iccom_device(None)
+    attach_transport_device_to_iccom_device(fdvio_platform_dev_name
+                                            , iccom_dev, None)
+
+    create_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+    set_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+
+    iccom_rpmsg_addr = None
+    seq_id = 1
+
+    for inject_pos in [-2,-1,1,2]:
+        for mismatch_frame in [0,1]:
+            for i in range(10):
+                iccom_rpmsg_addr, seq_id = lbrp_iccom_do_racing_message(
+                               l2i_msg_bytes=bytearray(os.urandom(10))
+                               , i2l_msg_bytes=bytearray(os.urandom(10))
+                               , iccom_ch=1
+                               , iccom_rpmsg_addr=iccom_rpmsg_addr
+                               , iccom_dev=iccom_dev
+                               , start_seq_num=seq_id
+                               , iccom_inject_pos=inject_pos
+                               , inject_size_mismatch_frame=mismatch_frame)
+
+    delete_iccom_device(iccom_dev, None)
+
+    remove_iccom_module()
+    remove_fdvio_module()
+    remove_lbrp_module()
+
+
 #--------------------------- MAIN ------------------------------------#
 
 def run_tests():
@@ -1194,7 +1285,7 @@ def run_tests():
         fdvio_test(test_iccom_fdvio_lbrp_data_stress, {})
         fdvio_test(test_iccom_fdvio_lbrp_data_multipackage_msgs_stress, {})
         fdvio_test(test_iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing, {})
-
+        fdvio_test(test_iccom_fdvio_lbrp_data_error_size_mismatch, {})
 
 if __name__ == '__main__':
 
