@@ -107,10 +107,6 @@ RUN echo "************** OVERALL RESULT ******************" \
 			&& echo "fdvio.iccom_fdvio_lbrp_data_error_timeout: \033[0;32mPASS\033[0m" \
 
  
-#RUN echo "************** OVERALL RESULT ******************" \
-#		&& grep "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing: PASS" /qemu_run_x86.log > /dev/null \
-#			&& echo "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing: \033[0;32mPASS\033[0m" \
-
 ## ARM
 
 ## Create the dtb file
@@ -118,8 +114,8 @@ RUN echo "************** OVERALL RESULT ******************" \
 #COPY ./device_tree/versatile-pb_fdvio.dts /builds/linux_arm/device_tree
 #RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/versatile-pb_fdvio.dts \
 #        > /builds/linux_arm/device_tree/versatile-pb_fdvio.dtb
-#
+
 #RUN run-qemu-tests-arm /builds/linux_arm/device_tree/versatile-pb_fdvio.dtb
-#
-## Check the expected results
+
+# Check the expected results
 #RUN grep "${TEST_NAME}.kernel: PASS" /qemu_run_arm.log

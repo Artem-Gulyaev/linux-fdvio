@@ -122,7 +122,7 @@ def lbrp_send_data(service_name, src_addr, dst_addr, data):
     output_data = dst_addr.to_bytes(4, 'big') + data;
 
     fdvio_common.write_sysfs_file(ept_file, output_data, None, True)
-    sleep(0.2)
+    sleep(0.1)
 
 
 # Reads the data which came to the "remote" endpoint with addr @dst_addr.
@@ -289,106 +289,6 @@ def iccom_read(iccom_dev, channel, err_expectation, binary=False):
     return output
 
 #----------------------- TEST HELPERS --------------------------------#
-
-# Performs the full duplex xfer on wire
-#
-# @transport_dev {string} full duplex test device name
-# @send_data the bytearray of the data to send
-# @error_R_expectation {number} the errno which is expected
-#                           to be caught. Example: None, errno.EIO, ...
-# @error_W_expectation {number} the errno which is expected
-#                           to be caught. Example: None, errno.EIO, ...
-#
-# RETURNS: the received data as bytearray
-def wire_xfer(transport_dev, send_data, error_R_expectation, error_W_expectation):
-    write_to_wire(transport_dev, send_data, error_W_expectation)
-    sleep(0.1)
-    return read_from_wire(transport_dev, error_R_expectation)
-
-# Does the wire full duplex xfer and checks if the
-# received data matches expected
-#
-# @transport_dev {string} full duplex test device name
-# @send_data the bytearray of the data to send
-# @expected_rcv_data bytearray we expect to receive
-# @error_R_expectation {number} the errno which is expected
-#                           to be caught on read. Example: None, errno.EIO, ...
-# @error_W_expectation {number} the errno which is expected
-#                           to be caught on write. Example: None, errno.EIO, ...
-# @log_msg the extra message to the log in case of failure
-#
-# Throws an exception if the received data doesn't match expected
-def check_wire_xfer(transport_dev, send_data, expected_rcv_data, error_R_expectation, error_W_expectation, log_msg=""):
-    rcv_data = wire_xfer(transport_dev, send_data, error_R_expectation, error_W_expectation)
-    if (rcv_data != expected_rcv_data):
-        raise RuntimeError("Unexpected data on wire%s!\n"
-                           "    %s (expected)\n"
-                           "    %s (received)\n"
-                           % (" (" + log_msg + ")" if len(log_msg) else ""
-                              , expected_rcv_data.hex(), rcv_data.hex()))
-
-# Does the wire full duplex ack xfer and checks if the other side
-# acks as well.
-#
-# @transport_dev {string} full duplex test device name
-# @error_R_expectation {number} the errno which is expected
-#                           to be caught on read. Example: None, errno.EIO, ...
-# @error_W_expectation {number} the errno which is expected
-#                           to be caught on write. Example: None, errno.EIO, ...
-#  @log_msg the extra message to the log in case of failure
-#
-# Throws an exception if the other side doesn't ack
-def check_wire_xfer_ack(transport_dev, error_R_expectation, error_W_expectation, log_msg=""):
-        check_wire_xfer(transport_dev, iccom_ack_package()
-                                     , iccom_ack_package()
-                        , error_R_expectation, error_W_expectation, log_msg)
-
-# Reads the data from the given channel of given device and checks
-# if it matches the expected data.
-#
-# @iccom_dev {string} iccom device name
-# @channel the channel id number
-# @expected_ch_data the string which is expected to be received from
-#   the channel
-# @err_expectation {number} the errno which is expected
-#                           to be caught. Example: None, errno.EIO, ...
-#
-# Throws an exception if the read data doesn't match expected
-def check_ch_data(iccom_device, channel, expected_ch_data, expected_error):
-    # time is a bad companion, but still we need some time to allow the
-    # kernel internals to work all out with 100% guarantee, to allow
-    # test stability
-    sleep(0.3)
-    output = iccom_read(iccom_device, channel, expected_error)
-
-    if(expected_error == None):
-        if (output != expected_ch_data):
-            raise RuntimeError("Unexpected data mismatch in channel!\n"
-                               "    %s (expected)\n"
-                               "    %s (received)\n"
-                               % (expected_ch_data, output))
-
-# Create the RW sysfs files for a full duplex test device and propagate
-# the error expectations
-#
-# @transport_dev {string} full duplex test device name
-# @err_expectation {number} the errno which is expected
-#                           to be caught. Example: None, errno.EIO, ...
-def create_transport_device_RW_files(transport_dev, err_expectation):
-    file = "/sys/devices/platform/%s/transport_ctl" % (transport_dev)
-    command = "c"
-    fdvio_common.write_sysfs_file(file, command, err_expectation)
-
-# Deletes the RW sysfs files for a full duplex test device and propagate
-# the error expectations
-#
-# @transport_dev {string} full duplex test device name
-# @err_expectation {number} the errno which is expected
-#                           to be caught. Example: None, errno.EIO, ...
-def delete_transport_device_RW_files(transport_dev, err_expectation):
-    file = "/sys/devices/platform/%s/transport_ctl" % (transport_dev)
-    command = "d"
-    fdvio_common.write_sysfs_file(file, command, err_expectation)
 
 # Iccom packaging configuration
 def iccom_params():
@@ -1001,7 +901,7 @@ def test_iccom_fdvio_lbrp_data_path(params, get_test_info=False):
 
         iccom_send(iccom_dev, iccom_ch, "hello to lbrp!".encode("utf-8")
                    , None, binary=True)
-        sleep(0.4)
+        sleep(0.2)
         iccom_addr, rcv_data = lbrp_read_data(service_name, remote_ept_addr)
 
         print("<- real:      %s" % (rcv_data.hex(),))
@@ -1010,7 +910,7 @@ def test_iccom_fdvio_lbrp_data_path(params, get_test_info=False):
             raise Exception("Received unexpected data from ICCom.")
 
         lbrp_send_data(service_name, remote_ept_addr, iccom_addr, lbrp2iccom_data)
-        sleep(0.4)
+        sleep(0.2)
 
         # Ack frame
         print("== Ack frame:")
@@ -1026,7 +926,7 @@ def test_iccom_fdvio_lbrp_data_path(params, get_test_info=False):
                             "Expected data:   %s", (rcv_data.hex() ,iccom2lbrp_data.hex()));
 
         lbrp_send_data(service_name, remote_ept_addr, iccom_addr, lbrp2iccom_data)
-        sleep(0.4)
+        sleep(0.2)
 
         # Check if data popped on iccom side
         str2iccom_expected = "hello to iccom!".encode("utf-8")
