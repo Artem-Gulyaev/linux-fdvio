@@ -40,7 +40,9 @@ RUN make -C ${kernel_source_dir_x86} M=${repo_path} \
         KDIR=${kernel_source_dir_x86} \
         CONFIG_BOSCH_DRIVERS=y \
         CONFIG_BOSCH_FDVIO_DRIVER=m \
-        CONFIG_CHECK_SIGNATURE=n
+        CONFIG_CHECK_SIGNATURE=n \
+		CONFIG_BOSCH_FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC=5000 \
+		CONFIG_BOSCH_FDVIO_ERROR_SILENCE_TIME_MSEC=30
 
 RUN mkdir -p ${INITRAMFS_CHROOT_X86}/modules              \
     && cp ${repo_path}/src/fdvio.ko         \
@@ -50,12 +52,14 @@ RUN mkdir -p ${INITRAMFS_CHROOT_X86}/modules              \
 
 # ARM
 RUN make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- \
-            -C ${kernel_source_dir_arm} \
-            M=${repo_path} \
-            KDIR=${kernel_source_dir_arm} \
-            CONFIG_BOSCH_DRIVERS=y \
-            CONFIG_BOSCH_FDVIO_DRIVER=m \
-            CONFIG_CHECK_SIGNATURE=n
+        -C ${kernel_source_dir_arm} \
+        M=${repo_path} \
+        KDIR=${kernel_source_dir_arm} \
+        CONFIG_BOSCH_DRIVERS=y \
+        CONFIG_BOSCH_FDVIO_DRIVER=m \
+        CONFIG_CHECK_SIGNATURE=n \
+		CONFIG_BOSCH_FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC=5000 \
+		CONFIG_BOSCH_FDVIO_ERROR_SILENCE_TIME_MSEC=30
 
 RUN mkdir -p ${INITRAMFS_CHROOT_ARM}/modules              \
     && cp ${repo_path}/src/fdvio.ko         \
@@ -99,6 +103,8 @@ RUN echo "************** OVERALL RESULT ******************" \
 			&& echo "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing: \033[0;32mPASS\033[0m" \
 		&& grep "fdvio.iccom_fdvio_lbrp_data_error_size_mismatch: PASS" /qemu_run_x86.log > /dev/null \
 			&& echo "fdvio.iccom_fdvio_lbrp_data_error_size_mismatch: \033[0;32mPASS\033[0m" \
+		&& grep "fdvio.iccom_fdvio_lbrp_data_error_timeout: PASS" /qemu_run_x86.log > /dev/null \
+			&& echo "fdvio.iccom_fdvio_lbrp_data_error_timeout: \033[0;32mPASS\033[0m" \
 
  
 #RUN echo "************** OVERALL RESULT ******************" \

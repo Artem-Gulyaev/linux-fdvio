@@ -198,19 +198,35 @@
 
 // The timeout for waiting for the other side data after we have sent our.
 #ifndef FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC
-    //#define FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 10
-	// FIXME: FOR PRODUCTION IT MUST BE 10 or comparable
-    #define FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 5000
+    #define FDVIO_THEIR_DATA_WAIT_TIMEOUT_MSEC 30
 #endif
 // How much time we sleep ignoring all if error occured
 #ifndef FDVIO_ERROR_SILENCE_TIME_MSEC
-    #define FDVIO_ERROR_SILENCE_TIME_MSEC 50
+    #define FDVIO_ERROR_SILENCE_TIME_MSEC 37
 #endif
 
 #define FDVIO_DEV_NAME_MAX_LEN 80
 
 // This guy is used if customer didn't provide its RX buffer
 #define FDVIO_OWN_RX_BUFFER_SIZE_BYTES 512
+
+#ifndef FDVIO_WORKQUEUE_MODE
+#define FDVIO_WORKQUEUE_MODE FDVIO_WQ_PRIVATE
+#endif
+
+#define FDVIO_WQ_SYSTEM 0
+#define FDVIO_WQ_SYSTEM_HIGHPRI 1
+#define FDVIO_WQ_PRIVATE 2
+
+// Comparator
+#define FDVIO_WQ_MODE_MATCH(x)		\
+	FDVIO_WORKQUEUE_MODE == FDVIO_WQ_##x
+
+#ifndef FDVIO_WORKQUEUE_MODE
+#error FDVIO_WORKQUEUE_MODE must be defined to \
+		one of [FDVIO_WQ_SYSTEM, FDVIO_WQ_SYSTEM_HIGHPRI, \
+		FDVIO_WQ_PRIVATE].
+#endif
 
 // The cold-and-dark state of the driver - before initialization was even
 // carried out.
@@ -324,6 +340,12 @@ struct fdvio_dev {
 	// drv_data points to this struct.
 	struct full_duplex_device fdtd;
 
+#if FDVIO_WQ_MODE_MATCH(PRIVATE)
+	struct workqueue_struct *work_queue;
+#endif
+
+	struct work_struct recover_work;
+
 	char own_rx_buf[FDVIO_OWN_RX_BUFFER_SIZE_BYTES];
 };
 
@@ -352,6 +374,16 @@ static inline void __fdvio_stop_timeout_timer_sync(struct fdvio_dev *fdvio);
 static void __fdvio_other_side_wait_timeout_handler(struct timer_list *t);
 int __fdvio_rpmsg_rcv_cb(struct rpmsg_device *rpdev, void *msg, int msg_len
 				, void *private_data, u32 source);
+static inline int __fdvio_init_workqueue(
+		struct fdvio_dev *const fdvio);
+static inline void __fdvio_close_workqueue(
+		struct fdvio_dev *const fdvio);
+static inline void __fdvio_schedule_work(
+		struct fdvio_dev *const fdvio
+		, struct work_struct *work);
+static inline void __fdvio_cancel_work_sync(
+		struct fdvio_dev *const fdvio
+		, struct work_struct *work);
 int __fdvio_set_next_xfer_id(struct fdvio_dev *fdvio);
 int __fdvio_accept_data(struct fdvio_dev* fdvio
 		, struct __kernel full_duplex_xfer *xfer);
@@ -540,6 +572,8 @@ int fdvio_stop(void __kernel *device)
 
 	__fdvio_stop_timeout_timer_sync(fdvio);
 
+	__fdvio_cancel_work_sync(fdvio, &fdvio->recover_work);
+
 	fdvio->xfer = NULL;
 
 	(void)FDVIO_SWITCH_STRICT(SHUTTING_DOWN, INITIALIZED);
@@ -672,7 +706,10 @@ void __fdvio_goto_error_and_idle(struct fdvio_dev *fdvio
 			//     cause size mismatch can be instantly processed, cause
 			//     both sides see it the same.
 			if (error_code != FDVIO_ERROR_XFER_SIZE_MISMATCH) {
+				fdvio_trace("Going sleep for recovery: %d"
+                            , FDVIO_ERROR_SILENCE_TIME_MSEC);
 				msleep(FDVIO_ERROR_SILENCE_TIME_MSEC);
+				fdvio_trace("Got some sleep.");
 			}
 
 			// NOTE:
@@ -779,14 +816,18 @@ static inline void __fdvio_stop_timeout_timer_sync(struct fdvio_dev *fdvio)
 
 
 // Called by timeout timer. Launches error recovery on timeout.
+//
+// NOTE: this guy is called in IRQ context
 static void __fdvio_other_side_wait_timeout_handler(struct timer_list *t)
 {
 	struct fdvio_dev *fdvio = from_timer(fdvio, t, wait_timeout_timer);
 
+	fdvio_trace("Timeout: fdvio dev: %px, sheduling recovery.", fdvio);
+
 	FDVIO_CHECK_DEVICE(return);
 	FDVIO_CHECK_KERNEL_DEVICE(return);
 
-	__fdvio_goto_error_and_idle(fdvio, FDVIO_ERROR_OTHER_SIDE_TIMEOUT);
+	__fdvio_schedule_work(fdvio, &fdvio->recover_work);
 }
 
 // Is called from rpmsg engine when we receive the inbound message from
@@ -916,6 +957,100 @@ int __fdvio_rpmsg_rcv_cb(struct rpmsg_device *rpdev, void *msg, int msg_len
 
 /*------------------------------ FDVIO HELPERS -----------------------------*/
 
+static void __fdvio_recovery_sequence_wrapper(struct work_struct *work);
+// Helper.
+// Inits the workqueue which is to be used by Fdvio
+// in its current configuration. If we use system-provided
+// workqueu - does nothing.
+//
+// RETURNS:
+//      >= 0     - on success
+//      < 0     - negative error code
+//
+// ERRORS:
+//      FDVIO_ERROR_WORKQUEUE_INIT
+static inline int __fdvio_init_workqueue(
+		struct fdvio_dev *const fdvio)
+{
+#if FDVIO_WQ_MODE_MATCH(SYSTEM)
+	fdvio_info("using system wq");
+	(void)fdvio;
+	return 0;
+#elif FDVIO_WQ_MODE_MATCH(SYSTEM_HIGHPRI)
+	fdvio_info("using system_highpri wq");
+	(void)fdvio;
+	return 0;
+#elif FDVIO_WQ_MODE_MATCH(PRIVATE)
+	fdvio_info("using private wq");
+	fdvio->work_queue = alloc_workqueue("fdvio", WQ_HIGHPRI, 0);
+
+	if (fdvio->work_queue) {
+		return 0;
+	} else {
+		fdvio_err("the private work queue init failed");
+		return -ENODEV;
+	}
+#endif
+}
+
+// Helper.
+// Closes the workqueue which was used by Fdvio
+// in its current configuration. If we use system-provided
+// workqueue - does nothing.
+static inline void __fdvio_close_workqueue(
+		struct fdvio_dev *const fdvio)
+{
+#if FDVIO_WQ_MODE_MATCH(PRIVATE)
+	destroy_workqueue(fdvio->work_queue);
+	fdvio->work_queue = NULL;
+#else
+	(void)fdvio;
+#endif
+}
+
+// Helper.
+// Wrapper over schedule_work(...) for queue selected by configuration.
+static inline void __fdvio_schedule_work(
+		struct fdvio_dev *const fdvio
+		, struct work_struct *work)
+{
+#if FDVIO_WQ_MODE_MATCH(SYSTEM)
+	(void)fdvio;
+	schedule_work(work);
+#elif FDVIO_WQ_MODE_MATCH(SYSTEM_HIGHPRI)
+	(void)fdvio;
+	queue_work(system_highpri_wq, work);
+#elif FDVIO_WQ_MODE_MATCH(PRIVATE)
+	queue_work(fdvio->work_queue, work);
+#else
+#error no known Fdvio work queue mode defined
+#endif
+}
+
+// Helper.
+// Wrapper over cancel_work_sync(...) in case we will
+// need some custom queue operations on cancelling.
+static inline void __fdvio_cancel_work_sync(
+		struct fdvio_dev *const fdvio
+		, struct work_struct *work)
+{
+	cancel_work_sync(work);
+}
+
+// Work wrapper for recovery sequence
+static void __fdvio_recovery_sequence_wrapper(struct work_struct *work)
+{
+	if (IS_ERR_OR_NULL(work)) {
+		pr_err("work ptr is broken: %px\n", work);
+		return;
+	}
+
+	struct fdvio_dev *fdvio = (struct fdvio_dev *)container_of(
+									work, struct fdvio_dev, recover_work);
+
+	// NOTE: this scheduler only invoked on timeout error
+	__fdvio_goto_error_and_idle(fdvio, FDVIO_ERROR_OTHER_SIDE_TIMEOUT);
+}
 
 // Increment the next xfer ID and return the original value.
 // @fdvio {proper ptr to fdvio dev} our device
@@ -1111,6 +1246,13 @@ int __fdvio_init(void __kernel *device)
 	fdvio->next_xfer_id = 1;
 	fdvio->delayed_xfer_request = false;
 
+	INIT_WORK(&fdvio->recover_work, __fdvio_recovery_sequence_wrapper);
+	int res = __fdvio_init_workqueue(fdvio);
+	if (res < 0) {
+
+		fdvio_err("Init abort due to WQ init failure, err: %d", res);
+		return res;
+	}
 	// We create a platform device, which iccom will be bound to.
     // NOTE: this device is just an adapter to provide the iccom
     // formal device to bind to and provide the data.
@@ -1155,6 +1297,9 @@ int __fdvio_close(void __kernel *device)
                   " error: %d", res);
 		return -EFAULT;
     }
+
+	// wrap up with used workqueue
+	__fdvio_close_workqueue(fdvio);
 
     if (!FDVIO_SWITCH_STRICT(INITIALIZED, COLD)
             || !FDVIO_SWITCH_STRICT(COLD, COLD)) {

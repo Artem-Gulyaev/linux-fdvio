@@ -264,7 +264,8 @@ def iccom_send(iccom_dev, channel, message, err_expectation, binary=False):
     set_iccom_sysfs_channel(iccom_dev, channel, None)
     # Write to the working sysfs channel
     file = "/sys/devices/platform/%s/channels_RW" % (iccom_dev)
-    print("iccom_send: " + str(channel))
+    print("iccom_send: " + str(channel) + " -> "
+          + message.hex() if binary else str(message))
     command = message
     fdvio_common.write_sysfs_file(file, command, err_expectation, binary=binary)
 
@@ -1271,6 +1272,124 @@ def test_iccom_fdvio_lbrp_data_error_size_mismatch(
     remove_fdvio_module()
     remove_lbrp_module()
 
+def test_iccom_fdvio_lbrp_data_error_timeout(params, get_test_info=False):
+
+    if (get_test_info):
+        return { "test_description": (
+                        "insmod lbrp, insmod fdvio, insmod iccom"
+                        " create remote fdvio ept (creates the fdvio device)"
+                        ", bind iccom to fdvio platform device,"
+                        " , create & set iccom sysfs channel"
+                        " , write to this channel, use wrong message from lbrp side"
+                        " randomly, but still check data pops in lbrp"
+                        " and in iccom.")
+                 , "test_id": "fdvio.iccom_fdvio_lbrp_data_error_timeout" }
+
+    iccom_dev = "iccom.0"
+    iccom_ch = 1
+    remote_ept_addr = 5432
+    service_name = "fdvio"
+    fdvio_platform_dev_name = "fdvio_pd.1"
+    fdvio_platform_dev_path = ("/sys/devices/platform/"
+                               + fdvio_platform_dev_name)
+
+    # ACTION!
+
+    insert_lbrp_module()
+    insert_fdvio_module()
+    insert_iccom_module()
+
+    lbrp_create_remote_ept(service_name, remote_ept_addr)
+
+    create_iccom_device(None)
+    attach_transport_device_to_iccom_device(fdvio_platform_dev_name
+                                            , iccom_dev, None)
+
+    create_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+    set_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
+
+    iccom_rpmsg_addr = None
+    seq_id = 1
+
+
+    # DATA SCENARIO
+    
+    for i in range(10):
+
+        i2l_msg_bytes = bytearray(os.urandom(10))
+        l2i_msg_bytes = bytearray(os.urandom(10))
+
+        i2l_expected_wire_data_empry = iccom_package(seq_id, bytearray())
+
+        # sending the data from iccom side
+        iccom_send(iccom_dev, iccom_ch, i2l_msg_bytes, None, binary=True)
+        # in testing the other-side-wait timeout is 5 seconds
+        time_s = 6.0
+        print("== other side 'stall' simulation: %s ==" % (str(time_s),))
+        sleep(time_s)
+        print("== other side 'stall' end ==")
+        # we read out the first data frame
+        iccom_rpmsg_addr, rcv_wire_data = lbrp_read_data(service_name, remote_ept_addr)
+
+        print("<- real:          %s" % (rcv_wire_data.hex(),))
+        print("<- expected:      %s" % (i2l_expected_wire_data_empry.hex(),))
+
+        if (rcv_wire_data != i2l_expected_wire_data_empry):
+            raise Exception("got unexpected data with timeout test")
+        
+        # timeout will raise an error in fdvio and this error will be
+        # propagated to the ICCom, and then iccom and we will send the
+        # nack frames and then resend the last data
+
+        lbrp_iccom_do_frame(iccom_nack_package(), iccom_nack_package()
+                            , iccom_rpmsg_addr, "Error recovery")
+        
+        # We repeat our last data frame
+
+        _,_ = lbrp_iccom_do_frame(
+                        iccom_package(seq_id, iccom_packet(iccom_ch
+                                                           , l2i_msg_bytes
+                                                           , True))
+                        , i2l_expected_wire_data_empry
+                        , iccom_rpmsg_addr
+                        , "Repeat after timeout Data.%d" % seq_id)
+
+        lbrp_iccom_do_frame(iccom_ack_package(), iccom_ack_package()
+                            , iccom_rpmsg_addr, "Ack.%d" % seq_id)
+
+
+        seq_id += 1
+
+        i2l_expected_wire_data = iccom_package(seq_id, iccom_packet(iccom_ch
+                                                                    , i2l_msg_bytes
+                                                                    , True))
+        _,_ = lbrp_iccom_do_frame(iccom_package(seq_id, bytearray())
+                                  , i2l_expected_wire_data
+                                  , iccom_rpmsg_addr
+                                  , "Data.%d" % seq_id)
+
+        lbrp_iccom_do_frame(iccom_ack_package(), iccom_ack_package()
+                            , iccom_rpmsg_addr, "Ack.%d" % seq_id)
+
+        seq_id += 1
+
+        l2i_msg_real = iccom_read(iccom_dev, iccom_ch, None, binary=True)
+
+        print("On ICCom side: <- real:      %s" % (l2i_msg_real.hex(),))
+        print("On ICCom side: <- expected:  %s" % (l2i_msg_bytes.hex(),))
+
+        if l2i_msg_real != l2i_msg_bytes:
+            raise Exception("On ICCom side real and expected bytes don't match.")
+
+    # EOF DATA SCENARIO
+
+    delete_iccom_device(iccom_dev, None)
+
+    remove_iccom_module()
+    remove_fdvio_module()
+    remove_lbrp_module()
+
+
 
 #--------------------------- MAIN ------------------------------------#
 
@@ -1286,6 +1405,7 @@ def run_tests():
         fdvio_test(test_iccom_fdvio_lbrp_data_multipackage_msgs_stress, {})
         fdvio_test(test_iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing, {})
         fdvio_test(test_iccom_fdvio_lbrp_data_error_size_mismatch, {})
+        fdvio_test(test_iccom_fdvio_lbrp_data_error_timeout, {})
 
 if __name__ == '__main__':
 
