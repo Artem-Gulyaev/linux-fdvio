@@ -75,6 +75,12 @@ FROM fdvio AS fdvio-test
 ## SIMPLE INSERTION / REMOVAL TEST
 RUN python-to-initramfs-x86 ${repo_path}/tests/fdvio_tests.py
 
+#COPY tests/insmod_rmmod_test.sh /builds/shell-tests/
+#RUN shell-to-initramfs-arm /builds/shell-tests/insmod_rmmod_test.sh
+
+COPY tests/arm_basic_test.sh /builds/shell-tests/
+RUN shell-to-initramfs-arm /builds/shell-tests/arm_basic_test.sh
+
 ######################### TEST RUN BLOCK ############################
 
 ## x86
@@ -82,6 +88,7 @@ RUN python-to-initramfs-x86 ${repo_path}/tests/fdvio_tests.py
 RUN run-qemu-tests-x86
 
 # Check the expected results
+
 RUN echo "************** OVERALL RESULT ******************" \
 	 	&& grep "fdvio.lbrp_insmod_rmmod: PASS" /qemu_run_x86.log > /dev/null \
 			&& echo "fdvio.lbrp_insmod_rmmod: \033[0;32mPASS\033[0m" \
@@ -103,19 +110,19 @@ RUN echo "************** OVERALL RESULT ******************" \
 			&& echo "fdvio.iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing: \033[0;32mPASS\033[0m" \
 		&& grep "fdvio.iccom_fdvio_lbrp_data_error_size_mismatch: PASS" /qemu_run_x86.log > /dev/null \
 			&& echo "fdvio.iccom_fdvio_lbrp_data_error_size_mismatch: \033[0;32mPASS\033[0m" \
-		&& grep "fdvio.iccom_fdvio_lbrp_data_error_timeout: PASS" /qemu_run_x86.log > /dev/null \
+    	&& grep "fdvio.iccom_fdvio_lbrp_data_error_timeout: PASS" /qemu_run_x86.log > /dev/null \
 			&& echo "fdvio.iccom_fdvio_lbrp_data_error_timeout: \033[0;32mPASS\033[0m" \
 
  
 ## ARM
 
-## Create the dtb file
-#RUN mkdir -p /builds/linux_arm/device_tree
-#COPY ./device_tree/versatile-pb_fdvio.dts /builds/linux_arm/device_tree
-#RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/versatile-pb_fdvio.dts \
-#        > /builds/linux_arm/device_tree/versatile-pb_fdvio.dtb
+# Create the dtb file
+RUN mkdir -p /builds/linux_arm/device_tree
+COPY ./device_tree/versatile-pb.dts /builds/linux_arm/device_tree/
+RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/versatile-pb.dts \
+        > /builds/linux_arm/device_tree/versatile-pb.dtb
 
-#RUN run-qemu-tests-arm /builds/linux_arm/device_tree/versatile-pb_fdvio.dtb
+RUN run-qemu-tests-arm /builds/linux_arm/device_tree/versatile-pb.dtb
 
 # Check the expected results
-#RUN grep "${TEST_NAME}.kernel: PASS" /qemu_run_arm.log
+RUN grep "${TEST_NAME}.kernel: PASS" /qemu_run_arm.log

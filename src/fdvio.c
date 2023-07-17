@@ -33,6 +33,7 @@
 #include <linux/rpmsg.h>
 #include <linux/proc_fs.h>
 #include <linux/platform_device.h>
+#include <linux/of_device.h>
 
 #include <linux/full_duplex_interface.h>
 
@@ -300,6 +301,9 @@
 // No current xfer provided
 #define FDVIO_ERROR_NO_XFER 9
 
+
+// pre-declaration
+static struct rpmsg_driver fdvio_driver;
 
 // The device itself
 // @magic the field where the FDVIO_MAGIC should be written upon the
@@ -1123,16 +1127,23 @@ int __fdvio_accept_data(struct fdvio_dev* fdvio
 /*------------ FDVIO FULL DUPLEX TRANSPORT PLATFORM DEVICE ---------*/
 
 // Inits adapter platform device.
+// @pdev the target platform device to work with, if NULL, then the device
+//		will be automatically created.
 // RETURNS:
 //		0: all fine
 //		!0: negated error code
-static int __fdvio_ff_dev_init(struct fdvio_dev* fdvio)
+static int __fdvio_ff_dev_init(struct fdvio_dev* fdvio
+		, struct platform_device *pdev)
 {
 	fdvio_info("starting initialization of platform adapter device");
 
-	fdvio->pdev = platform_device_register_simple("fdvio_pd", 1, NULL, 0);
+	if (IS_ERR_OR_NULL(pdev)) {
+		fdvio->pdev = platform_device_register_simple("fdvio_pd", 1, NULL, 0);
+	} else {
+		fdvio->pdev = pdev;
+	}
 	if (IS_ERR_OR_NULL(fdvio->pdev)) {
-		fdvio_err("could not create the platform device for fdvio");
+		fdvio_err("could not create/reuse the platform device for fdvio");
 		goto pd_register_failed;
 	}
 
@@ -1159,12 +1170,17 @@ pd_register_failed:
 }
 
 // Just closes the platform device (adapter toward ICCom).
-static int __fdvio_ff_dev_close(struct fdvio_dev* fdvio)
+static int __fdvio_ff_dev_close(struct fdvio_dev* fdvio
+		, bool unregister_pd)
 {
 	fdvio_info("platform adapter device closing: %px", fdvio);
 
 	dev_set_drvdata(&fdvio->pdev->dev, NULL);
-	platform_device_unregister(fdvio->pdev);
+
+	if (unregister_pd) {
+		platform_device_unregister(fdvio->pdev);
+	}
+
 	fdvio->pdev = NULL;
 	fdvio->fdtd.iface = NULL;
 	fdvio->fdtd.dev = NULL;
@@ -1174,16 +1190,88 @@ static int __fdvio_ff_dev_close(struct fdvio_dev* fdvio)
 	return 0;
 }
 
-// Only formal thing.
-static int fdvio_ff_dev_probe(struct platform_device *fdvio)
+// Device tree node members:
+// 		* "fdvio_dev" must point to the parent fdvio device.
+//
+// Example:
+//      iccomsk0: iccomsk0 {
+//			compatible = "iccom_socket_if";
+//			iccom_dev = <&iccom0>;
+//			protocol_family = <22>;
+//	    };
+//
+//	    iccom0: iccom0 {
+//			compatible = "iccom";
+//			transport_dev = <&fdvio_pd0>;
+//	    };
+//
+//      fdvio_pd0: fdvio_pd0 {
+//			compatible = "fdvio_pd";
+//          fdvio_dev = <&fdvio0>;
+//      };
+//
+//      fdvio0: fdvio0 {
+//			compatible = "fdvio";
+//      };
+//
+// here we will do real things only when created from DT
+static int fdvio_ff_dev_probe(struct platform_device *fdvio_pd)
 {
-	return 0;
+	if (IS_ERR_OR_NULL(fdvio_pd->dev.of_node)) {
+		return 0;
+	}
+
+	// if we're here, it is creation from Device Tree
+
+	dev_info(&fdvio_pd->dev, "Probing the fdvio_pd dev from DT, id: %d"
+             , fdvio_pd->id);
+
+	struct device_node *fdvio_pd_dt_node = fdvio_pd->dev.of_node;
+
+	struct device_node *fdvio_dt_node = of_parse_phandle(fdvio_pd_dt_node
+								                         , "fdvio_dev", 0);
+	if (IS_ERR_OR_NULL(fdvio_dt_node)) {
+		dev_err(&fdvio_pd->dev, "\"fdvio_dev\" property is not defined or valid"
+                ", you need to set it to bind the fdvio platform device"
+                " to its base fdvio device.");
+		return -EINVAL;
+	}
+
+	// a bit hacky way to get the rpmsg bus device
+	struct device *dev = bus_find_device_by_of_node(fdvio_driver.drv.bus
+                                                    , fdvio_dt_node);
+
+	struct fdvio_dev* fdvio = dev_get_drvdata(dev);
+
+	of_node_put(fdvio_dt_node);
+
+	FDVIO_CHECK_DEVICE(return -ENODEV);
+
+	dev_info(&fdvio_pd->dev, "Base fdvio device: %px", fdvio);
+
+	return __fdvio_ff_dev_init(fdvio, fdvio_pd);
 }
 
 // Only formal thing.
-static int fdvio_ff_dev_remove(struct platform_device *fdvio)
+static int fdvio_ff_dev_remove(struct platform_device *fdvio_pd)
 {
-	return 0;
+	if (IS_ERR_OR_NULL(fdvio_pd->dev.of_node)) {
+		return 0;
+	}
+
+	// if we're here, we're working with Device Tree
+
+	struct full_duplex_device *fdtd = dev_get_drvdata(&fdvio_pd->dev);
+
+	if (IS_ERR_OR_NULL(fdtd)) {
+		dev_err(&fdvio_pd->dev, "The driver data is broken.");
+		return -EINVAL;
+	}
+	
+	struct fdvio_dev* fdvio = fdtd->dev;
+    FDVIO_CHECK_DEVICE(return -ENODEV);
+
+	return __fdvio_ff_dev_close(fdvio, false);
 }
 
 // The ICCom driver compatible definition for
@@ -1261,7 +1349,7 @@ int __fdvio_init(void __kernel *device)
 	timer_setup(&fdvio->wait_timeout_timer
 			, __fdvio_other_side_wait_timeout_handler, 0);
 
-	__fdvio_ff_dev_init(fdvio);
+	__fdvio_ff_dev_init(fdvio, NULL);
 
 	if (!FDVIO_SWITCH_STRICT(COLD, INITIALIZED)) {
 		BUG_ON(true);
@@ -1289,7 +1377,7 @@ int __fdvio_close(void __kernel *device)
 
 	fdvio_info("closing dev: %px, dev state: %d", device, FDVIO_STATE());
 
-	__fdvio_ff_dev_close(fdvio);
+	__fdvio_ff_dev_close(fdvio, true);
 
     int res = fdvio_stop(device);
     if (res) {
@@ -1536,7 +1624,7 @@ static int __init fdvio_module_init(void)
 		pr_err("fdvio main driver register failed: %d", ret);
 		return ret;
 	}
-
+	
 	ret = platform_driver_register(&fdvio_pd_driver);
 	if (ret != 0) {
 		pr_err("fdvio platform driver register failed: %d", ret);

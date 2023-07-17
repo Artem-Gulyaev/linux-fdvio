@@ -15,24 +15,14 @@
 		i2c0 = &i2c0;
 	};
 
+	rpmsg: rpmsg{
+		compatible = "loopback_rpmsg";
+		status = "okay";
+	};
+
 	chosen {
 		stdout-path = &uart0;
 	};
-
-//	iccomsk0: iccomsk0 {
-//			compatible = "iccom_socket_if";
-//			iccom_dev = <&iccom0>;
-//			protocol_family = <22>;
-//	};
-
-//	iccom0: iccom0 {
-//			compatible = "iccom";
-//			transport_dev = <&fd_test_transport0>;
-//	};
-//
-//	fd_test_transport0: fd_test_transport0 {
-//			compatible = "fd_test_transport";
-//	};
 
 	memory {
 		device_type = "memory";
