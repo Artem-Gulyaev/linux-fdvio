@@ -116,6 +116,15 @@ RUN echo "************** OVERALL RESULT ******************" \
  
 ## ARM
 
+# TODO: here must be the testing up to userspace level
+
+#RUN cd /repos \
+#        && git clone ssh://git@sourcecode.socialcoding.bosch.com:7999/cm_ci2_linux/libiccom.git
+#RUN mkdir -p /builds/libiccom && cd /builds/libiccom \
+#    && cmake -DCMAKE_CXX_COMPILER=arm-linux-gnueabi-g++ /repos/libiccom \
+#    && make && cmake --install . --prefix /builds/initramfs_arm/content
+
+
 # Create the dtb file
 RUN mkdir -p /builds/linux_arm/device_tree
 COPY ./device_tree/versatile-pb.dts /builds/linux_arm/device_tree/
@@ -125,4 +134,15 @@ RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/versatile-pb.dts \
 RUN run-qemu-tests-arm /builds/linux_arm/device_tree/versatile-pb.dtb
 
 # Check the expected results
-RUN grep "${TEST_NAME}.kernel: PASS" /qemu_run_arm.log
+RUN grep "fdvio.arm.lbrp.lbrp_dev_created: PASS" /qemu_run_arm.log > /dev/null \
+			&& echo "fdvio.arm.lbrp.lbrp_dev_created: \033[0;32mPASS\033[0m" \
+        && grep "fdvio.arm.lbrp.fdvio_platform_dev_created: PASS" /qemu_run_arm.log > /dev/null \
+			&& echo "fdvio.arm.lbrp.fdvio_platform_dev_created: \033[0;32mPASS\033[0m" \
+        && grep "fdvio.arm.iccom_dev_created: PASS" /qemu_run_arm.log > /dev/null \
+			&& echo "fdvio.arm.iccom_dev_created: \033[0;32mPASS\033[0m" \
+        && grep "fdvio.arm.iccom_skif_dev_created: PASS" /qemu_run_arm.log > /dev/null \
+			&& echo "fdvio.arm.iccom_skif_dev_created: \033[0;32mPASS\033[0m" \
+        && grep "fdvio.arm.udev_stack.min_com: PASS" /qemu_run_arm.log > /dev/null \
+			&& echo "fdvio.arm.udev_stack.min_com: \033[0;32mPASS\033[0m" \
+        && grep "fdvio.arm.reached_shutdown: PASS" /qemu_run_arm.log > /dev/null \
+			&& echo "fdvio.arm.reached_shutdown: \033[0;32mPASS\033[0m"

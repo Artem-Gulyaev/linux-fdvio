@@ -15,7 +15,7 @@
 		i2c0 = &i2c0;
 	};
 
-	rpmsg: rpmsg{
+	rpmsg: rpmsg {
 		compatible = "loopback_rpmsg";
 		status = "okay";
 	};
