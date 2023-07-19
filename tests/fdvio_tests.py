@@ -12,7 +12,7 @@ import fdvio_common as fdvio_common
 
 # 1: means full testing
 # 10: will divide all iterations count by 10
-ITERATIONS_DOWNSCALE_FACTOR=10
+ITERATIONS_DOWNSCALE_FACTOR=1
 
 def lbrp_dev_name():
     return "lbrp.1"
