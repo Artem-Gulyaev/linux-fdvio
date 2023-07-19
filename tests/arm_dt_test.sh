@@ -213,10 +213,4 @@ iccom_data_exchange_to_transport_with_iccom_data_with_transport_data() {
 
 iccom_data_exchange_to_transport_with_iccom_data_with_transport_data
 
-# Now shutdown simulation #
-
-echo "===== Removing remote endpoint for 'fdvio' service:"
-echo -n "${RPMSG_SERVICE_NAME} ${LBRP_REMOTE_EPT_ADDR}" \
-        > /sys/devices/platform/${LBRP_DEV}/remove_ept
-
 echo "fdvio.arm.dt.reached_shutdown: PASS"
