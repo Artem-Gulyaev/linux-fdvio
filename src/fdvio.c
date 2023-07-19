@@ -1190,8 +1190,17 @@ static int __fdvio_ff_dev_close(struct fdvio_dev* fdvio
 	return 0;
 }
 
+// Matches the device with "fdvio" driver - used to find the rpmsg
+// fdvio device, when we're waiting for it.
+static int __fdvio_ff_match_fdvio(struct device *dev, const void *data)
+{
+    (void)data;
+    pr_info("  * rpmsg dev: %s, drv: %s\n", dev_name(dev), dev->driver->name);
+    return !strcmp(dev->driver->name, "fdvio");
+}
+
 // Device tree node members:
-// 		* "fdvio_dev" must point to the parent fdvio device.
+//      None, for now.
 //
 // Example:
 //      iccomsk0: iccomsk0 {
@@ -1205,13 +1214,9 @@ static int __fdvio_ff_dev_close(struct fdvio_dev* fdvio
 //			transport_dev = <&fdvio_pd0>;
 //	    };
 //
+//      // will wait for the creation of the rpmsg fdvio device
 //      fdvio_pd0: fdvio_pd0 {
 //			compatible = "fdvio_pd";
-//          fdvio_dev = <&fdvio0>;
-//      };
-//
-//      fdvio0: fdvio0 {
-//			compatible = "fdvio";
 //      };
 //
 // here we will do real things only when created from DT
@@ -1222,6 +1227,10 @@ static int fdvio_ff_dev_probe(struct platform_device *fdvio_pd)
 	}
 
 	// if we're here, it is creation from Device Tree
+
+    // this section is the full initialization from the device tree,
+    // when the fdvio_dev can be created via DT
+#ifdef FDVIO_PD_FULL_DT
 
 	dev_info(&fdvio_pd->dev, "Probing the fdvio_pd dev from DT, id: %d"
              , fdvio_pd->id);
@@ -1241,9 +1250,60 @@ static int fdvio_ff_dev_probe(struct platform_device *fdvio_pd)
 	struct device *dev = bus_find_device_by_of_node(fdvio_driver.drv.bus
                                                     , fdvio_dt_node);
 
+    if (IS_ERR_OR_NULL(dev)) {
+		dev_err(&fdvio_pd->dev, "could not find the 'fdvio_dev' device to"
+                ", link with.");
+		return -ENODEV;
+    }
+
+	dev_info(&fdvio_pd->dev, "fdvio dev to be linked: %px", dev);
+
 	struct fdvio_dev* fdvio = dev_get_drvdata(dev);
 
 	of_node_put(fdvio_dt_node);
+
+	FDVIO_CHECK_DEVICE(return -ENODEV);
+
+	dev_info(&fdvio_pd->dev, "Base fdvio device: %px", fdvio);
+
+	return __fdvio_ff_dev_init(fdvio, fdvio_pd);
+
+#endif
+
+    // this section is for the initialization in the following way:
+    // 
+    // fdvio_pd -> created via DT
+    // * within the creation it waits for the fdvio rpmsg service to come up
+    //
+    // fdvio -> created via announcement from the other side
+    // * checks for the fdvio_pd device in the DT and if it is there
+    //   does not create the fdvio_pd device.
+
+	struct device *dev;
+   
+    for (int i = 0; i < 10; i++) {
+	    dev_info(&fdvio_pd->dev, "Search for rpmsg fdvio device:");
+
+        dev = bus_find_device(fdvio_driver.drv.bus, NULL, NULL
+                              , __fdvio_ff_match_fdvio);
+
+        if (!IS_ERR_OR_NULL(dev)) {
+            break;
+        }
+	    msleep(300);
+	    dev_info(&fdvio_pd->dev, "Waiting for the fdvio rpmsg device...");
+    }
+
+    if (IS_ERR_OR_NULL(dev)) {
+		dev_err(&fdvio_pd->dev, "failed to wait for 'fdvio' rpmsg service"
+                " to link with. Aborting.");
+		return -ENODEV;
+    }
+
+	dev_info(&fdvio_pd->dev, "Detected fdvio rpmsg device:  %s (%px)"
+             , dev_name(dev), dev);
+
+	struct fdvio_dev* fdvio = dev_get_drvdata(dev);
 
 	FDVIO_CHECK_DEVICE(return -ENODEV);
 
@@ -1349,7 +1409,22 @@ int __fdvio_init(void __kernel *device)
 	timer_setup(&fdvio->wait_timeout_timer
 			, __fdvio_other_side_wait_timeout_handler, 0);
 
-	__fdvio_ff_dev_init(fdvio, NULL);
+
+
+    // if the fdvio_pd node is declared in the DT, then we will not
+    // create it by ourselves - it will be created by kernel automatically
+    // and then inside its probe it will wait for 'fdvio' device on rpmsg
+    // bus.
+
+    struct device_node * fdvio_pd_node = of_find_compatible_node(
+                                                NULL, NULL, "fdvio_pd");
+    if (IS_ERR_OR_NULL(fdvio_pd_node)) {
+	    fdvio_info("automatic creating fdvio_pd device, cause not in DT.");
+	    __fdvio_ff_dev_init(fdvio, NULL);
+    } else {
+	    fdvio_info("fdvio_pd device is to be provided from DT.");
+        of_node_put(fdvio_pd_node);
+    }
 
 	if (!FDVIO_SWITCH_STRICT(COLD, INITIALIZED)) {
 		BUG_ON(true);
@@ -1504,7 +1579,7 @@ EXPORT_SYMBOL(full_duplex_fdvio_iface);
 __maybe_unused
 static int fdvio_probe(struct rpmsg_device *rpdev)
 {
-	pr_info("fdvio: probing of fdvio device started.\n");
+	pr_info("fdvio: probing of fdvio device started, rpdev: %px\n", rpdev);
 
 	if (IS_ERR_OR_NULL(rpdev)) {
 		pr_err("Broken pointer to the rpmsg_device in %s\n", __func__);
@@ -1624,12 +1699,14 @@ static int __init fdvio_module_init(void)
 		pr_err("fdvio main driver register failed: %d", ret);
 		return ret;
 	}
+	pr_info("registered rpmsg driver.");
 	
 	ret = platform_driver_register(&fdvio_pd_driver);
 	if (ret != 0) {
 		pr_err("fdvio platform driver register failed: %d", ret);
 		goto platform_drv_failed;
 	}
+	pr_info("registered platform driver.");
 
 	pr_info("fdvio module loaded.");
 

@@ -111,7 +111,7 @@ check_wire_xfer() {
     # Receive the data on lbrp side
     local rcv_data=$(lbrp_read ${lbrp_device_name} ${fdvio_service_name} ${lbrp_remote_ept_addr})
  
-    if [ ${rcv_data} != ${exp_rcv_data} ]
+    if [ "${rcv_data}" != "${exp_rcv_data}" ]
     then
         echo "Expectation failed!"
         echo "Lbrp expected: " ${exp_rcv_data}
@@ -123,65 +123,55 @@ check_wire_xfer() {
 
 ######################## TEST EXEC SEQUENCE ##########################
 
-insmod /modules/loopback_rpmsg_proc.ko
-insmod /modules/fdvio.ko
-insmod /modules/iccom.ko
-insmod /modules/iccom_socket_if.ko
-sleep 1
-
 LBRP_DEV="lbrp.1"
 RPMSG_SERVICE_NAME="fdvio"
 LBRP_REMOTE_EPT_ADDR="5432"
-FDVIO_PL_DEV="fdvio_pd.1"
+FDVIO_PL_DEV="fdvio_pd0"
+ICCOM_DEV="iccom0"
+ICCOM_SKIF_DEV="iccomsk0"
+ICCOM_SKIF_SOCKETS_FAMILY="22"
 
-echo "== fdvio.lbrp.arm.lbrp_dev_created"
-ls -al /sys/devices/platform | grep "${LBRP_DEV}"
-echo "fdvio.arm.lbrp.lbrp_dev_created: PASS"
 
-sleep 1
+echo "== loopback_rpmsg_proc: inserting"
+insmod /modules/loopback_rpmsg_proc.ko
+echo "== fdvio: inserting"
+insmod /modules/fdvio.ko &
 
 echo "===== Creating remote endpoint for 'fdvio' service:"
 echo -n "${RPMSG_SERVICE_NAME} ${LBRP_REMOTE_EPT_ADDR}" \
         > /sys/devices/platform/${LBRP_DEV}/create_ept
 
-echo "== fdvio.lbrp.arm.fdvio_platform_dev_created"
+sleep 1
+
+echo "== iccom: inserting"
+insmod /modules/iccom.ko
+echo "== iccom_socket_if: inserting"
+insmod /modules/iccom_socket_if.ko
+
+echo "== fdvio.arm.dt.lbrp.lbrp_dev_created"
+ls -al /sys/devices/platform | grep "${LBRP_DEV}"
+echo "fdvio.arm.dt.lbrp.lbrp_dev_created: PASS"
+
+echo "== fdvio.arm.dt.lbrp.fdvio_platform_dev_created"
 ls -al /sys/devices/platform | grep "${FDVIO_PL_DEV}"
-echo "fdvio.arm.lbrp.fdvio_platform_dev_created: PASS"
+echo "fdvio.arm.dt.lbrp.fdvio_platform_dev_created: PASS"
 
 ############## In production this will be the Udev rule ##############
 
 # will be triggered when the "fdvio" service appears in rpmsg
 
-ICCOM_DEV="iccom.0"
-ICCOM_SKIF_DEV="iccom_socket_if.0"
-ICCOM_SKIF_SOCKETS_FAMILY="22"
-
-echo "===== Creating ICCom device:"
-echo -n " " > "/sys/class/iccom/create_iccom"
-
-echo "== fdvio.iccom_dev_created"
+echo "== fdvio.arm.dt.iccom_dev_created"
 ls -al /sys/bus/platform/devices | grep "${ICCOM_DEV}"
-echo "fdvio.arm.iccom_dev_created: PASS"
+echo "fdvio.arm.dt.iccom_dev_created: PASS"
 
-echo "===== Binding ICCom to Fdvio device:"
-echo -n "${FDVIO_PL_DEV}" > "/sys/devices/platform/${ICCOM_DEV}/transport"
-
-echo "===== Creating ICComSkif device:"
-echo -n " " > "/sys/class/iccom_socket_if/create_device"
-
-echo "== fdvio.iccom_skif_dev_created"
+echo "== fdvio.arm.dt.iccom_skif_dev_created"
 ls -al /sys/bus/platform/devices | grep "${ICCOM_SKIF_DEV}"
-echo "fdvio.arm.iccom_skif_dev_created: PASS"
-
-echo "===== Binding ICComSkif to ICCom device:"
-echo -n "${ICCOM_SKIF_SOCKETS_FAMILY}" \
-        > "/sys/devices/platform/${ICCOM_SKIF_DEV}/protocol_family"
-echo -n "${ICCOM_DEV}" > "/sys/devices/platform/${ICCOM_SKIF_DEV}/iccom_dev"
+echo "fdvio.arm.dt.iccom_skif_dev_created: PASS"
 
 ###########################  EOF Udev rule ############################
 
 iccom_data_exchange_to_transport_with_iccom_data_with_transport_data() {
-    echo "== fdvio.arm.udev_stack.min_com"
+    echo "== fdvio.arm.dt.udev_stack.min_com"
 
     local channel="1"
     local lbrp_dev="lbrp"
@@ -216,7 +206,7 @@ iccom_data_exchange_to_transport_with_iccom_data_with_transport_data() {
                     ${exp_data} ${LBRP_DEV} ${RPMSG_SERVICE_NAME} \
                     ${LBRP_REMOTE_EPT_ADDR}
 
-    echo "fdvio.arm.udev_stack.min_com: PASS"
+    echo "fdvio.arm.dt.udev_stack.min_com: PASS"
 }
 
 # Small communication test #
@@ -225,14 +215,8 @@ iccom_data_exchange_to_transport_with_iccom_data_with_transport_data
 
 # Now shutdown simulation #
 
-echo "===== Removing ICComSkif device:"
-echo -n "${ICCOM_SKIF_DEV}" > "/sys/class/iccom_socket_if/delete_device"
-
-echo "===== Removing ICCom device:"
-echo -n "${ICCOM_DEV}" > "/sys/class/iccom/delete_iccom"
-
 echo "===== Removing remote endpoint for 'fdvio' service:"
 echo -n "${RPMSG_SERVICE_NAME} ${LBRP_REMOTE_EPT_ADDR}" \
         > /sys/devices/platform/${LBRP_DEV}/remove_ept
 
-echo "fdvio.arm.reached_shutdown: PASS"
+echo "fdvio.arm.dt.reached_shutdown: PASS"

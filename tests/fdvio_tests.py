@@ -10,6 +10,10 @@ import traceback
 
 import fdvio_common as fdvio_common
 
+# 1: means full testing
+# 10: will divide all iterations count by 10
+ITERATIONS_DOWNSCALE_FACTOR=10
+
 def lbrp_dev_name():
     return "lbrp.1"
 
@@ -611,8 +615,10 @@ def lbrp_iccom_do_racing_message(l2i_msg_bytes
                                           , "Data.%d" % seq_pkg_num
                                           , i2l_expected_alternative_wire_data
                                             =i2l_package_alt if i2l_idle else None
-                                          , action_before_send=inject_iccom_message if iccom_inject_pos == -1 and i == 0 else None
-                                          , action_after_send=inject_iccom_message if iccom_inject_pos == 1 and i == 0 else None
+                                          , action_before_send=inject_iccom_message
+                                            if iccom_inject_pos == -1 and i == 0 else None
+                                          , action_after_send=inject_iccom_message
+                                            if iccom_inject_pos == 1 and i == 0 else None
                                           )
 
         # removing the parts of message already sent
@@ -674,13 +680,6 @@ def lbrp_iccom_do_racing_message(l2i_msg_bytes
         raise Exception("On ICCom side real and expected bytes don't match.")
 
     return (iccom_rpmsg_addr, seq_pkg_num)
-
-
-# TODO:      timeout behaviour test
-# TODO:      timeout behaviour test
-# TODO:      timeout behaviour test
-# TODO:      timeout behaviour test
-
 
 #--------------------------- TESTS -----------------------------------#
 
@@ -982,7 +981,7 @@ def test_iccom_fdvio_lbrp_data_stress(params, get_test_info=False):
 
 
     seq_id = 1
-    for i in range(100):
+    for i in range(int(100.0 / ITERATIONS_DOWNSCALE_FACTOR)):
         _, seq_id = lbrp_iccom_do_message(
                        l2i_msg_bytes=("hello, I'm lbrp".encode("utf-8"))
                        , i2l_msg_bytes=("hello, I'm iccom".encode("utf-8"))
@@ -1042,7 +1041,7 @@ def test_iccom_fdvio_lbrp_data_multipackage_msgs_stress(params, get_test_info=Fa
     set_iccom_sysfs_channel(iccom_dev, iccom_ch, None)
 
     seq_id = 1
-    for i in range(30):
+    for i in range(int(30.0 / ITERATIONS_DOWNSCALE_FACTOR)):
         _, seq_id = lbrp_iccom_do_message(
                        l2i_msg_bytes=bytearray(os.urandom(1000))
                        , i2l_msg_bytes=bytearray(os.urandom(1000))
@@ -1097,7 +1096,7 @@ def test_iccom_fdvio_lbrp_data_multipackage_msgs_stress_racing(
     seq_id = 1
 
     for inject_pos in [-2,-1,1,2]:
-        for i in range(30):
+        for i in range(int(30.0 / ITERATIONS_DOWNSCALE_FACTOR)):
             iccom_rpmsg_addr, seq_id = lbrp_iccom_do_racing_message(
                            l2i_msg_bytes=bytearray(os.urandom(10))
                            , i2l_msg_bytes=bytearray(os.urandom(10))
@@ -1155,7 +1154,7 @@ def test_iccom_fdvio_lbrp_data_error_size_mismatch(
 
     for inject_pos in [-2,-1,1,2]:
         for mismatch_frame in [0,1]:
-            for i in range(10):
+            for i in range(int(10.0 / ITERATIONS_DOWNSCALE_FACTOR)):
                 iccom_rpmsg_addr, seq_id = lbrp_iccom_do_racing_message(
                                l2i_msg_bytes=bytearray(os.urandom(10))
                                , i2l_msg_bytes=bytearray(os.urandom(10))
@@ -1214,7 +1213,7 @@ def test_iccom_fdvio_lbrp_data_error_timeout(params, get_test_info=False):
 
     # DATA SCENARIO
     
-    for i in range(10):
+    for i in range(int(10.0 / ITERATIONS_DOWNSCALE_FACTOR)):
 
         i2l_msg_bytes = bytearray(os.urandom(10))
         l2i_msg_bytes = bytearray(os.urandom(10))
