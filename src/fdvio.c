@@ -1195,6 +1195,18 @@ static int __fdvio_ff_dev_close(struct fdvio_dev* fdvio
 static int __fdvio_ff_match_fdvio(struct device *dev, const void *data)
 {
     (void)data;
+    if (IS_ERR_OR_NULL(dev)) {
+        return 0;
+    }
+    if (IS_ERR_OR_NULL(dev_name(dev))) {
+        return 0;
+    }
+    if (IS_ERR_OR_NULL(dev->driver)) {
+        return 0;
+    }
+    if (IS_ERR_OR_NULL(dev->driver->name)) {
+        return 0;
+    }
     pr_info("  * rpmsg dev: %s, drv: %s\n", dev_name(dev), dev->driver->name);
     return !strcmp(dev->driver->name, "fdvio");
 }
@@ -1281,9 +1293,15 @@ static int fdvio_ff_dev_probe(struct platform_device *fdvio_pd)
 
 	struct device *dev;
    
+    if (IS_ERR_OR_NULL(fdvio_driver.drv.bus)) {
+        dev_err(&fdvio_pd->dev, "fdvio driver bus is not set!");    
+        return -EINVAL;
+    }
+
     for (int i = 0; i < 10; i++) {
 	    dev_info(&fdvio_pd->dev, "Search for rpmsg fdvio device:");
 
+        
         dev = bus_find_device(fdvio_driver.drv.bus, NULL, NULL
                               , __fdvio_ff_match_fdvio);
 
