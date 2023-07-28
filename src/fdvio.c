@@ -1608,6 +1608,9 @@ static int fdvio_probe(struct rpmsg_device *rpdev)
 		return -EINVAL;
 	}
 
+    // we want to announce our announcement to the other side
+    rpdev->announce = true;
+
 	dev_info(&rpdev->dev, "fdvio: driver rev.: "BOSCH_FDVIO_DRIVER_VERSION"\n");
 	dev_info(&rpdev->dev, "fdvio: new device, channel: 0x%x -> 0x%x\n"
 			 , rpdev->src, rpdev->dst);
