@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.3-labs
-
 # NOTE: Default build for the fdvio modules
 #       with its different variants
 FROM iccom:latest AS fdvio
@@ -7,18 +5,6 @@ FROM iccom:latest AS fdvio
 # Base (default) version
 ARG kernel_source_dir_x86=/repos/linux_x86/
 ARG kernel_source_dir_arm=/repos/linux_arm/
-
-##  Prepare the compatible Linux kernels first
-
-# x86
-RUN cd /repos/linux_x86
-COPY ./vm/linux-config/x86.config  /repos/linux_x86/.config
-RUN make_apply_linux_x86
-
-# ARM
-RUN cd /repos/linux_arm
-COPY ./vm/linux-config/arm.config  /repos/linux_arm/.config
-RUN make_apply_linux_arm
 
 ##  Prepare the fdvio sources
 
@@ -113,7 +99,7 @@ RUN echo "************** OVERALL RESULT ******************" \
     	&& grep "fdvio.iccom_fdvio_lbrp_data_error_timeout: PASS" /qemu_run_x86.log > /dev/null \
 			&& echo "fdvio.iccom_fdvio_lbrp_data_error_timeout: \033[0;32mPASS\033[0m" \
 
- 
+
 ## ARM
 
 # TODO: here must be the testing up to userspace level
