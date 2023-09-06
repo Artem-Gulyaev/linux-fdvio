@@ -114,14 +114,14 @@ RUN echo "************** OVERALL RESULT ******************" \
 
 # Create the dtb file
 RUN mkdir -p /builds/linux_arm/device_tree
-COPY ./device_tree/versatile-pb.dts /builds/linux_arm/device_tree/
-RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/versatile-pb.dts \
-        > /builds/linux_arm/device_tree/versatile-pb.dtb
+COPY ./device_tree/ast2500.dts /builds/linux_arm/device_tree/
+RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/ast2500.dts \
+        > /builds/linux_arm/device_tree/ast2500.dtb
 
 RUN rm /builds/initramfs_arm/content/tests/*
 RUN shell-to-initramfs-arm /repos/linux-fdvio/tests/arm_basic_test.sh
 
-RUN run-qemu-tests-arm /builds/linux_arm/device_tree/versatile-pb.dtb
+RUN run-qemu-tests-arm /builds/linux_arm/device_tree/ast2500.dtb
 
 # Check the expected results
 RUN grep "fdvio.arm.lbrp.lbrp_dev_created: PASS" /qemu_run_arm.log > /dev/null \
@@ -141,14 +141,14 @@ RUN grep "fdvio.arm.lbrp.lbrp_dev_created: PASS" /qemu_run_arm.log > /dev/null \
 
 # Create the dtb file
 RUN mkdir -p /builds/linux_arm/device_tree
-COPY ./device_tree/versatile-pb-auto.dts /builds/linux_arm/device_tree/
-RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/versatile-pb-auto.dts \
-        > /builds/linux_arm/device_tree/versatile-pb-auto.dtb
+COPY ./device_tree/ast2500-auto.dts /builds/linux_arm/device_tree/
+RUN dtc -I dts -O dtb /builds/linux_arm/device_tree/ast2500-auto.dts \
+        > /builds/linux_arm/device_tree/ast2500-auto.dtb
 
 RUN rm /builds/initramfs_arm/content/tests/*
 RUN shell-to-initramfs-arm /repos/linux-fdvio/tests/arm_dt_test.sh
 
-RUN run-qemu-tests-arm /builds/linux_arm/device_tree/versatile-pb-auto.dtb
+RUN run-qemu-tests-arm /builds/linux_arm/device_tree/ast2500-auto.dtb
 
 RUN grep "fdvio.arm.dt.lbrp.lbrp_dev_created: PASS" /qemu_run_arm.log > /dev/null \
 			&& echo "fdvio.arm.dt.lbrp.lbrp_dev_created: \033[0;32mPASS\033[0m" \
