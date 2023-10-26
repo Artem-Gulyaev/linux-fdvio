@@ -2,8 +2,8 @@
 # version, but leave opportunity to update it.
 KVER_DOCKER ?= v5.4
 
-KVER_LOCAL?= $(shell uname -r)
-KDIR_LOCAL ?= /lib/modules/$(KVER_LOCAL)/build
+KVER ?= $(shell uname -r)
+KDIR ?= /lib/modules/$(KVER)/build
 
 # NOTE: don't change this unless you're sure what you're doing
 #	cause by this tag the dependent components refer to the current
@@ -25,7 +25,7 @@ endef
 
 # Creates the Fdvio test Build
 default:
-	$(MAKE) -C ${KDIR_LOCAL} M=$$PWD \
+	$(MAKE) -C ${KDIR} M=$$PWD \
 		CONFIG_BOSCH_DRIVERS=y \
 		CONFIG_BOSCH_FDVIO_DRIVER=m \
 		CONFIG_BOSCH_FDVIO_DRIVER_VERSION=$(git rev-parse HEAD) \
@@ -33,15 +33,15 @@ default:
 
 # Cleans Fdvio
 clean:
-	$(MAKE) -C ${KDIR_LOCAL} M=$$PWD clean
+	$(MAKE) -C ${KDIR} M=$$PWD clean
 
 # Install to current machine
 install:
-	$(MAKE) -C $(KDIR_LOCAL) M=$$PWD modules_install
+	$(MAKE) -C $(KDIR) M=$$PWD modules_install
 
 # Try to remove the installed driver from current machine
 uninstall:
-	rm -f /lib/modules/${KVER_LOCAL}/extra/src/fdvio.ko
+	rm -f /lib/modules/${KVER}/extra/src/fdvio.ko
 
 # Build Docker deployed image (Docker image with built and installed Fdvio
 # driver)
