@@ -13,7 +13,7 @@ RUN rm -rf ${repo_path} && mkdir -p ${repo_path}
 
 # TODO: MOVE THIS TO KERNEL MODULES BASE IMAGE
 
-RUN apt-get install --yes gdb libncurses-dev
+RUN apt-get update && apt-get install --yes --fix-missing gdb libncurses-dev
 
 # add only for the container, not for an image
 WORKDIR ${repo_path}
