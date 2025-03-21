@@ -439,8 +439,7 @@ int fdvio_data_xchange(void __kernel *device
 }
 EXPORT_SYMBOL(fdvio_data_xchange);
 
-// Updates the default data. Not used by ICComm and probably
-// will be dropped later in IF.
+// Updates the default data.
 // @device is a pointer to the fdvio device
 __maybe_unused
 int fdvio_default_data_update(void __kernel *device
@@ -453,9 +452,11 @@ int fdvio_default_data_update(void __kernel *device
 	(void)(xfer);
 	(void)(force_size_change);
 
-	fdvio_err("Not implemented, cause not used.");
+	// TODO: ACTUALLY IMPLEMENT IT (iccom started to use it):
+	//  we can replace the default data if the package is not yet sent, cause
+	//  was not requested to start immediately by protocol driver.
 
-	return 0;
+	return -ENOSYS;
 }
 EXPORT_SYMBOL(fdvio_default_data_update);
 
